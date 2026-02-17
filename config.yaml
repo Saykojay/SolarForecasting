@@ -1,0 +1,115 @@
+data:
+  csv_path: data/raw/singapore_pv_weather_2020_2025.csv
+  csv_separator: ;
+  time_col: timestamp
+  time_format: '%d/%m/%Y %H:%M'
+  target_col: pv_output_kw
+  ghi_col: ghi_wm2
+  dhi_col: dhi_wm2
+  temp_col: ambient_temp_c
+  rh_col: relative_humidity_pct
+  wind_speed_col: wind_speed_ms
+  wind_dir_col: wind_direction_deg
+  poa_col: poa_global_wm2
+pv_system:
+  nameplate_capacity_kw: 15.93
+  temp_coeff: -0.0045
+  ref_temp: 25
+  system_efficiency: 0.86
+target:
+  use_csi: true
+  csi_ghi_threshold: 50
+  csi_max: 1.2
+splitting:
+  train_ratio: 0.7
+  test_ratio: 0.3
+forecasting:
+  horizon: 24
+model:
+  architecture: patchtst
+  hyperparameters:
+    patch_len: 16
+    stride: 8
+    d_model: 128
+    n_heads: 8
+    n_layers: 4
+    dropout: 0.1
+    learning_rate: 0.0001
+    batch_size: 32
+    lookback: 168
+training:
+  epochs: 100
+  patience: 15
+  lr_patience: 7
+  lr_factor: 0.2
+  min_lr: 1.0e-06
+tuning:
+  enabled: false
+  n_trials: 50
+  search_space:
+    patch_len:
+    - 12
+    - 24
+    - 12
+    stride:
+    - 8
+    - 16
+    - 4
+    d_model:
+    - 64
+    - 128
+    n_heads:
+    - 4
+    - 8
+    n_layers:
+    - 3
+    - 6
+    dropout:
+    - 0.1
+    - 0.25
+    learning_rate:
+    - 0.0001
+    - 0.0008
+    batch_size:
+    - 32
+    - 64
+    lookback:
+    - 72
+    - 168
+    - 24
+tscv:
+  enabled: true
+  n_splits: 5
+features:
+  scaler_type: minmax
+  corr_threshold: 0.4
+  multicol_threshold: 0.95
+  selection_mode: auto
+  manual_features: []
+  groups:
+    weather: true
+    time: false
+    lags: true
+    physics: true
+    rolling: true
+    time_hour: true
+    time_month: true
+    time_doy: true
+    time_year: true
+mlflow:
+  experiment_name: PatchTST_CSI_TransferLearning
+  tracking_uri: mlruns
+paths:
+  processed_dir: data/processed\version_20260216_0953_tangerang_pv_weather_2020_2024\version_20260216_1054_tangerang_pv_weather_2020_2024\version_20260216_1103_tangerang_pv_weather_2020_2024\version_20260216_1131_tangerang_pv_weather_2020_2024\version_20260216_1524_dkasc_with_dc_power_10_5kw
+  models_dir: models
+  logs_dir: logs
+  target_data_dir: data/target
+seed: 42
+preprocessing:
+  resample_1h: true
+  remove_outliers: true
+  ghi_high_pv_zero: true
+  ghi_dark_pv_high: true
+  fix_ghi_dhi: true
+  clip_precipitation: 100.0
+  impute_missing_pv: false

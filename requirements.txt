@@ -1,0 +1,28 @@
+# Core
+numpy
+pandas
+scikit-learn
+joblib
+
+# Deep Learning
+tensorflow>=2.10
+
+# Experiment Tracking
+optuna
+mlflow
+
+# TUI & Visuals
+rich
+questionary
+
+# Configuration
+pyyaml
+python-dotenv
+
+# Visualization
+matplotlib
+seaborn
+
+# Dashboard
+streamlit
+plotly

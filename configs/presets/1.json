@@ -1,0 +1,26 @@
+{
+  "features": {
+    "scaler_type": "standard",
+    "corr_threshold": 0.4,
+    "multicol_threshold": 0.9,
+    "selection_mode": "auto",
+    "manual_features": [],
+    "groups": {
+      "weather": true,
+      "time": false,
+      "lags": false,
+      "physics": false,
+      "rolling": false,
+      "time_hour": true,
+      "time_month": true,
+      "time_doy": true,
+      "time_year": false
+    }
+  },
+  "target": {
+    "use_csi": true,
+    "csi_ghi_threshold": 50,
+    "csi_max": 1.2
+  },
+  "timestamp": "2026-02-17T11:07:40.096351"
+}
