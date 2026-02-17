@@ -13,8 +13,10 @@
 10. [Hyperparameter Tuning (Optuna)](#10-hyperparameter-tuning-optuna)
 11. [Time Series Cross-Validation (TSCV)](#11-time-series-cross-validation-tscv)
 12. [Target Domain Testing (Data Indonesia)](#12-target-domain-testing-data-indonesia)
-13. [Fitur-Fitur Terbaru](#13-fitur-fitur-terbaru)
-14. [Troubleshooting](#14-troubleshooting)
+13. [Fitur-Fitur Terbaru (v1)](#13-fitur-fitur-terbaru-v1)
+14. [Manajemen Versi Data & Model](#14-manajemen-versi-data--model)
+15. [Version Control (Git & GitHub)](#15-version-control-git--github)
+16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
@@ -215,14 +217,21 @@ Di sidebar kiri, Anda bisa mengatur:
 - **Opsi Pipeline** — Toggle Optuna tuning dan TSCV
 - **Simpan Konfigurasi** — Menyimpan perubahan ke `config.yaml`
 
-#### Tab Utama
-| Tab | Fungsi |
-|-----|--------|
-| **Runner** | Jalankan setiap step pipeline (Preprocess, Train, Evaluate, Full Pipeline, Tune) |
-| **Data Insights** | Statistik preprocessing, analisis fitur, correlation heatmap |
-| **Training** | Grafik loss curve, learning rate, dan metrik training |
-| **Evaluation** | Metrik performa (MAE, RMSE, R², nMAE), scatter plot, time series comparison |
-| **Logs** | History log dari semua aktivitas pipeline |
+#### Tab Utama (ML Pipeline Flow)
+
+Dashboard didesain mengikuti alur kerja *Machine Learning* yang standar:
+
+| Tab | Tujuan | Komponen Utama |
+|-----|--------|----------------|
+| **🧪 Feature Lab** | Perancangan Strategi | Preset Manager, Manual/Auto Feature Selection. |
+| **📥 Preprocessing** | **Pusat Kendali Data** | Pilih Dataset CSV, Atur Feature Groups, Split Ratio, Scaling, Cleaning Rules. |
+| **🔎 Data Insights** | Verifikasi Visual | Metamorfosis Data (Cleaning Stats), Correlation Matrix, Sequence Preview. |
+| **🎯 Tuning** | Optimasi Otomatis | Optuna Hyperparameter Search. |
+| **🧠 Training Center** | Eksekusi Training | **Pilih Versi Data**, Live Loss Curve, Model Registry. |
+| **📈 Evaluation** | Analisis Performa | Metrik komprehensif (MAE, RMSE, R²), Visualisasi Prediksi. |
+| **📦 Target Test** | Real-world Testing | Pemuatan data eksternal (indonesia) ke model terlatih. |
+| **🚀 Runner** | Eksekusi Cepat | Tombol sekali klik untuk Prep, Train, dan Eval. |
+| **📋 Logs** | Monitoring | Log sistem dan riwayat preprocessing terakhir. |
 
 ### 5.3 Model Manager (Fitur Baru)
 
@@ -530,49 +539,67 @@ TSCV SUMMARY
 
 ---
 
-## 13. Fitur-Fitur Terbaru
+## 13. Fitur-Fitur Terbaru (v1)
 
-### 13.1 Model Manager
-- Setiap model yang dilatih **otomatis tersimpan** di folder `models/` dengan nama unik
-- Di Web Dashboard, Anda bisa **memilih model aktif** lewat dropdown di sidebar
-- Evaluasi akan menggunakan model yang Anda pilih — berguna untuk membandingkan performa
+### 13.1 Cyclical Time Encoding (Sin/Cos)
+Alih-alih menggunakan angka jam (0-23) atau bulan (1-12) secara linear, sistem ini menggunakan transformasi trigonometri untuk menjaga kontinuitas temporal:
+- **Hourly**: Menghubungkan jam 23:00 kembali ke jam 00:00 dengan mulus.
+- **Monthly**: Menghubungkan Desember ke Januari untuk menangkap siklus musim tahunan.
+- **Seasonal (DOY)**: Menggunakan *Day of Year* (1-365) untuk resolusi tinggi. SHAP analysis membuktikan fitur ini sangat krusial setelah suhu udara.
 
 ### 13.2 Preprocessing yang Diperkuat (Algorithm 1)
 Preprocessing sekarang mencakup deteksi outlier yang lebih ketat:
-- **Physical Extremes**: GHI > 2000, Temp < -30, RH di luar 0-100%, Wind Speed < 0
-- **PV-GHI Inconsistency**: PV = 0 padahal GHI > 200 W/m² (seharusnya ada produksi)
-- **Sensor Error**: PV tinggi padahal GHI gelap (< threshold)
-- **Frozen Data**: Nilai stagnant non-zero selama 10+ jam berturut-turut (sensor hang)
+- **Physical Extremes**: GHI > 2000, Temp < -30, RH di luar 0-100%, Wind Speed < 0.
+- **Precipitation Clipping**: Membatasi nilai curah hujan ekstrem yang sering merusak gradien model.
+- **PV Imputation**: Mengisi gap kecil pada data PV menggunakan korelasi berbasis CSI.
 
-Semua aturan bisa di-toggle ON/OFF lewat sidebar di Web Dashboard.
-
-### 13.3 Data Insights Tab
-Tab baru di Web Dashboard yang menampilkan:
-- Statistik preprocessing (baris asli, setelah cleaning, yang dihapus)
-- Analisis fitur dan seleksi
-- Correlation heatmap antar fitur
-- Preview data
-
-### 13.4 Persistensi (Refresh-Safe)
-Data training dan evaluasi sekarang tersimpan di disk (`logs/session/`):
-- **Training history** — loss curves dan metrics per epoch
-- **Eval results** — MAE, RMSE, R², nMAE
-- **Selected model** — model mana yang terakhir dipilih
-- Data ini **otomatis dimuat kembali** saat halaman di-refresh
-
-### 13.5 GPU Memory Management
-- Evaluasi sekarang otomatis **membersihkan memori GPU** sebelum berjalan
-- Mencegah error **"unable to synchronize"** (OOM) yang terjadi saat evaluasi langsung setelah training
-- Batch size prediksi dioptimalkan untuk stabilitas
-
-### 13.6 Auto-Detect Model Shape
-- Evaluasi sekarang **otomatis mendeteksi horizon dan lookback dari model** yang dimuat
-- Tidak lagi bergantung pada nilai di config — menghindari error shape mismatch
-- Berguna saat mengevaluasi model lama yang dilatih dengan konfigurasi berbeda
+### 13.3 Data Meta-Insights
+Tab Insights kini menampilkan **"Metamorfosis Data"**:
+- Melihat bagaimana baris data berkurang/bertambah di setiap tahap cleaning.
+- Meninjau korelasi fitur baru (seperti Lag atau CSI) sebelum model dilatih.
 
 ---
 
-## 14. Troubleshooting
+## 14. Manajemen Versi Data & Model
+
+### 14.1 Pemilihan Versi Preprocessed
+Setiap kali Anda klik **"Start Preprocessing"**, sistem membuat folder baru di `data/processed/` dengan nama `v_MMDD_HHMM_filename`. 
+
+**Cara menggunakan versi tertentu untuk training:**
+1. Masuk ke tab **🧠 Training Center**.
+2. Cari expander **"📦 Pilih Versi Data Preprocessed"**.
+3. Pilih versi yang diinginkan (defaultnya adalah "Latest").
+4. Jika versi baru tidak muncul, klik tombol **"🔄 Refresh Daftar Versi"**.
+
+### 14.2 Model Registry
+Model disimpan di folder `models/` lengkap dengan `meta.json` dan `scaler.pkl`. Anda dapat memuat model lama kapan pun melalui Model Manager di sidebar.
+
+---
+
+## 15. Version Control (Git & GitHub)
+
+Proyek ini terintegrasi dengan Git untuk melacak setiap perubahan kode Anda.
+
+### 15.1 Workflow Harian (Push Perubahan)
+Jika Anda mengubah file (misal menambahkan model baru atau mengubah `data_prep.py`):
+1. Buka **Anaconda Prompt**.
+2. `cd` ke folder proyek.
+3. `git add .` (tambahkan semua perubahan).
+4. `git commit -m "update: menambahkan fitur X"` (simpan progres dengan catatan).
+5. `git push` (unggah ke GitHub).
+
+### 15.2 Menarik Update dari GitHub (Pull)
+Jika Anda mengerjakan proyek di komputer lain:
+`git pull origin main`
+
+### 15.3 Mengapa Menggunakan Git?
+- **Pencadangan**: Kode Anda aman di GitHub jika laptop bermasalah.
+- **Rollback**: Bisa kembali ke versi kode minggu lalu jika ada error besar.
+- **Kolaborasi**: Memungkinkan pengerjaan proyek bersama tim secara rapi.
+
+---
+
+## 16. Troubleshooting
 
 ### Error: `No module named 'tensorflow'`
 **Penyebab**: Python yang dipakai bukan dari env `tf-gpu`.  
