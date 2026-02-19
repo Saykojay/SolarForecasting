@@ -37,10 +37,12 @@ try:
     if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        # Using a friendlier print for the terminal, Streamlit will show this in the CLI logs
-        print(f"✅ Running in GPU Mode. Available GPUs: {len(gpus)}")
+        gpus_info = f"✅ Running in GPU Mode. Available GPUs: {len(gpus)}"
     else:
-        print("💡 Running in CPU Mode. No GPU detected or GPU disabled.")
+        gpus_info = "💡 Running in CPU Mode. No GPU detected or GPU disabled."
+    
+    time_str = datetime.now().strftime("%H:%M:%S")
+    print(f"[{time_str}] PID:{os.getpid()} {gpus_info}")
 except Exception as e:
     print(f"Error initializing GPU: {e}")
 
@@ -193,8 +195,10 @@ def save_config_to_file(cfg):
 # ============================================================
 # PERSISTENCE HELPERS (survive page refreshes)
 # ============================================================
-PERSIST_DIR = 'logs/session'
-PRESETS_DIR = 'configs/presets'
+# Gunakan path absolut relatif terhadap root folder project agar lebih robust
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+PERSIST_DIR = os.path.join(APP_ROOT, 'logs', 'session')
+PRESETS_DIR = os.path.join(APP_ROOT, 'configs', 'presets')
 
 def list_feature_presets():
     """List available feature engineering presets."""
@@ -381,25 +385,12 @@ cfg = st.session_state.cfg
 # IMPROVED: Robustly find the 'processed' root directory
 raw_root = cfg['paths']['processed_dir']
 root_out_dir = os.path.abspath(raw_root)
-
-# If we are inside a versioned folder (v1_, v_ atau version_), go up to find the 'processed' base
 while True:
     bname = os.path.basename(root_out_dir).lower()
-    # Check if current folder looks like a version
-    is_version = bname.startswith(('v', 'version_')) or "version_" in bname
-    # But don't go up if we are already at the 'processed' folder
-    if bname == 'processed':
-        break
-    
+    if bname == 'processed': break
     parent = os.path.dirname(root_out_dir)
-    if not parent or parent == root_out_dir: 
-        break
-    
-    if is_version or bname != 'processed':
-        root_out_dir = parent
-    else:
-        break
-
+    if not parent or parent == root_out_dir: break
+    root_out_dir = parent
 proc_dir = root_out_dir
 
 model_dir = cfg['paths']['models_dir']
@@ -824,6 +815,22 @@ with tab_prep_features:
                 pcfg['clip_precipitation'] = False
                 
             pcfg['impute_missing_pv'] = st.checkbox("Impute Missing PV (CSI-based)", value=pcfg.get('impute_missing_pv', False), key="p_imp")
+            
+            st.markdown("---")
+            st.markdown("##### ✂️ Row Trimming")
+            do_trim = st.checkbox("Batasi Jumlah Data (Limit Rows)", 
+                                 value=bool(pcfg.get('trim_rows')), 
+                                 help="Gunakan ini untuk mencoba subset data kecil (misal: 5000 baris pertama) demi kecepatan.",
+                                 key="p_trim_bool")
+            if do_trim:
+                pcfg['trim_rows'] = st.number_input("Jumlah Baris:", 
+                                                   min_value=100, 
+                                                   value=int(pcfg.get('trim_rows', 5000)) if pcfg.get('trim_rows') else 5000,
+                                                   step=1000,
+                                                   key="p_trim_val")
+            else:
+                pcfg['trim_rows'] = False
+
             cfg['preprocessing'] = pcfg
 
         st.markdown("---")
@@ -849,7 +856,7 @@ with tab_prep_features:
         st.markdown("**Run Preprocessing Pipeline**")
         st.caption("Proses ini akan menghasilkan file .npy dan scaler di folder data/processed.")
         v_name_prep = st.text_input("Nama Versi (Opsional)", placeholder="misal: v1_weather_only", key="v_name_prep")
-        run_preprocess = st.button("▶️ Start Preprocessing", type="primary", use_container_width=True, key="btn_prep_main")
+        run_preprocess = st.button("▶️ Start Preprocessing", type="primary", width="stretch", key="btn_prep_main")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col_prep_r:
@@ -1118,11 +1125,65 @@ with tab_eval:
 
 # --- TAB: DATA INSIGHTS ---
 with tab_data:
-    st.markdown("### 🔎 Data Transformation Insights")
+    st.markdown(f"### 🔎 {gt('data_insights', st.session_state.lang)}")
     st.caption("Detail metamorfosis data dari CSV mentah menjadi tensor yang siap dilatih oleh model.")
     
-    if st.session_state.prep_metadata:
-        m = st.session_state.prep_metadata
+    # --- VERSION SELECTOR FOR INSIGHTS ---
+    v_col1, v_col2 = st.columns([2, 1])
+    with v_col1:
+        # proc_dir is the root 'processed' folder found in the init section
+        if os.path.exists(proc_dir):
+            # RECURSIVE SEARCH: Find all subdirectories that contain prep_summary.json (up to 2 levels)
+            all_versions_paths = []
+            for d1 in os.listdir(proc_dir):
+                p1 = os.path.join(proc_dir, d1)
+                if os.path.isdir(p1):
+                    if os.path.exists(os.path.join(p1, 'prep_summary.json')):
+                        all_versions_paths.append(p1)
+                    # Check one level deeper (for nested versions)
+                    for d2 in os.listdir(p1):
+                        p2 = os.path.join(p1, d2)
+                        if os.path.isdir(p2) and os.path.exists(os.path.join(p2, 'prep_summary.json')):
+                            all_versions_paths.append(p2)
+            
+            # Convert back to relative paths for display and storage
+            all_versions = sorted([os.path.relpath(p, proc_dir).replace('\\', '/') for p in all_versions_paths], reverse=True)
+            all_versions = list(dict.fromkeys(all_versions)) # Remove duplicates
+            
+            # Identify current active version name for the index
+            current_active_path = os.path.abspath(st.session_state.cfg['paths']['processed_dir'])
+            current_rel_v = os.path.relpath(current_active_path, proc_dir).replace('\\', '/')
+            
+            options = ["Latest (Default)"] + all_versions
+            default_idx = 0
+            if current_rel_v in all_versions and os.path.abspath(current_active_path) != os.path.abspath(proc_dir):
+                default_idx = all_versions.index(current_rel_v) + 1
+                
+            sel_v = st.selectbox("📁 Load Archived Data Version:", options, index=default_idx, key="sel_v_insight_global")
+            
+            if sel_v == "Latest (Default)":
+                target_path = proc_dir
+            else:
+                target_path = os.path.join(proc_dir, sel_v)
+                
+            # If user switches version, update the global active dir and reload metadata
+            if os.path.abspath(target_path) != os.path.abspath(cfg['paths']['processed_dir']):
+                cfg['paths']['processed_dir'] = target_path
+                st.session_state.cfg = cfg
+                st.session_state.prep_metadata = load_prep_metadata_from_disk(target_path)
+                st.rerun()
+        else:
+            st.warning("Folder 'data/processed' belum ditemukan.")
+
+    with v_col2:
+        st.write("") # padding
+        st.write("") 
+        if st.button("🔄 Refresh Versions", width="stretch"):
+            st.rerun()
+
+    st.markdown("---")
+    m = st.session_state.get('prep_metadata')
+    if m:
         stats = m['stats']
         sel_f = m['selected_features']
         all_f = m['all_features']
@@ -1220,15 +1281,27 @@ with tab_data:
             
         with c2:
             st.markdown("**Input Template (Sequence Sample)**")
-            if 'X_train' in m:
-                # Show a sample of the first sequence 
-                seq_sample = m['X_train'][0] # (lookback, n_features)
+            
+            # Check if X_train is in memory
+            if 'X_train' in m and m['X_train'] is not None:
+                seq_sample = m['X_train'][0]
                 df_seq = pd.DataFrame(seq_sample, columns=sel_f)
                 st.dataframe(df_seq.head(10), width='stretch')
                 st.caption(f"Menampilkan 10 timestep pertama dari sequence ke-0 (Tensor Shape: {m['X_train'].shape})")
             else:
-                st.info("Preview tensor tidak tersedia di memori (silakan jalankan ulang Step 1 jika ingin melihat detail ini).")
-        
+                # Offer to load X_train.npy if it exists in the active folder
+                x_train_path = os.path.join(cfg['paths']['processed_dir'], 'X_train.npy')
+                if os.path.exists(x_train_path):
+                    st.info("Preview tensor tidak di memori (Mode Hemat RAM).")
+                    if st.button("📥 Load Sequence Preview"):
+                        try:
+                            # Load into the metadata dictionary
+                            m['X_train'] = np.load(x_train_path)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Gagal memuat preview: {e}")
+                else:
+                    st.info("Preview tensor tidak tersedia untuk versi ini.")
     else:
         st.info("Belum ada data preprocessing. Silakan jalankan 'Step 1: Preprocessing' pada tab Runner.")
 
@@ -1381,7 +1454,7 @@ with tab_train:
             m_name_train = st.text_input("Nama Model (ID)", placeholder="misal: patchtst_v1_exp1", key="m_name_train")
         with c2:
             st.write("") # mapping
-            run_train = st.button("🚀 Start Model Training", type="primary", use_container_width=True, disabled=not has_data)
+            run_train = st.button("🚀 Start Model Training", type="primary", width="stretch", disabled=not has_data)
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col_ctrl2:
@@ -1441,19 +1514,30 @@ with tab_train:
                         fig.add_trace(go.Scatter(x=epochs_list, y=[d['loss'] for d in self.epoch_data], name='Train', line=dict(color='#818cf8', width=2)))
                         fig.add_trace(go.Scatter(x=epochs_list, y=[d['val_loss'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6', width=2)))
                         fig.update_layout(template="plotly_dark", height=350, margin=dict(t=20, b=20), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                        chart_placeholder.plotly_chart(fig, use_container_width=True)
+                        chart_placeholder.plotly_chart(fig, width="stretch")
                         lr_display.caption(f"LR: {current_lr:.8f} | Best Val: {min(d['val_loss'] for d in self.epoch_data):.6f}")
-                        self.log_lines.append(f"Epoch {epoch+1:3d}: loss={loss:.6f}, val={val_loss:.6f}")
+                        
+                        # Fix: Add explicit print to CMD so user can see progress there too
+                        log_msg = f"Epoch {epoch+1}/{total_epochs}: loss={loss:.6f}, val_loss={val_loss:.6f}, lr={current_lr:.8f}"
+                        print(f"  > {log_msg}")
+                        self.log_lines.append(log_msg)
                         log_placeholder.code('\n'.join(self.log_lines))
 
                 # Device selection
                 if device == 'CPU': os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
                 else: os.environ.pop('CUDA_VISIBLE_DEVICES', None)
                 
+                print(f"\n[DEBUG] Entering Training block. Device: {device}")
+                import sys
+                sys.stdout.flush()
+
                 tf.keras.backend.clear_session()
                 live_cb = StreamlitLiveCallback()
                 from src.trainer import train_model
                 
+                print(f"[DEBUG] Calling train_model from src.trainer...")
+                sys.stdout.flush()
+
                 custom_id = m_name_train.strip() if m_name_train.strip() else None
                 model, history, meta = train_model(cfg, extra_callbacks=[live_cb], custom_model_id=custom_id)
                 
@@ -1484,7 +1568,7 @@ with tab_train:
             fig_l.add_trace(go.Scatter(y=hist['loss'], name='Train', line=dict(color='#818cf8')))
             fig_l.add_trace(go.Scatter(y=hist['val_loss'], name='Val', line=dict(color='#f472b6')))
             fig_l.update_layout(template="plotly_dark", height=350, title="Final Loss Curves", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_l, use_container_width=True)
+            st.plotly_chart(fig_l, width="stretch")
         with c2:
             st.metric("Best Val Loss", f"{min(hist['val_loss']):.6f}")
             st.metric("Total Epochs", len(hist['loss']))
@@ -1511,187 +1595,219 @@ with tab_train:
 
 # --- TAB BATCH: SEQUENTIAL TRAINING ---
 with tab_batch:
-    st.markdown(f"### {gt('batch_manager_title', st.session_state.lang)}")
-    st.info(gt('batch_info', st.session_state.lang))
-    
-    if 'batch_queue' not in st.session_state:
-        st.session_state.batch_queue = []
-    
-    col_bq1, col_bq2 = st.columns([1, 2])
-    
-    with col_bq1:
-        st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
-        q_arch = st.selectbox(gt('architecture', st.session_state.lang), ["patchtst", "gru", "lstm", "rnn"], key="q_arch")
-        q_name = st.text_input(gt('exp_name', st.session_state.lang), value=f"Exp_{q_arch}_{len(st.session_state.batch_queue)+1}")
+    try:
+        st.markdown(f"### {gt('batch_manager_title', st.session_state.lang)}")
+        st.info(gt('batch_info', st.session_state.lang))
         
-        with st.expander(gt('config_hp', st.session_state.lang), expanded=True):
-            q_hp = cfg['model']['hyperparameters'].copy()
-            
-            # --- Architecture Specific Labels ---
-            d_label = "d_model (Embedding)" if q_arch == "patchtst" else "Hidden Units"
-            l_label = "Transformer Blocks" if q_arch == "patchtst" else "Stacked RNN Layers"
-            
-            cq1, cq2 = st.columns(2)
-            with cq1:
-                q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key="q_lb")
-                
-                _d_opts = [16, 32, 64, 128, 256, 512]
-                q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key="q_dm")
-                q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key="q_nl")
-                
-            with cq2:
-                q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key="q_lr")
-                _bs_opts = [16, 32, 64, 128]
-                q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key="q_bs")
-                q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key="q_dr")
-
-            # --- SPECIFIC PARAMS ---
-            if q_arch == "patchtst":
-                st.markdown("---")
-                sq1, sq2 = st.columns(2)
-                with sq1:
-                    q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl")
-                    q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st")
-                with sq2:
-                    q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp['d_model']*2), 32, key="q_ff")
-                    _h_opts = [1, 2, 4, 8, 12, 16]
-                    q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key="q_nh")
-            
-            elif q_arch in ["gru", "lstm", "rnn"]:
-                st.markdown("---")
-                q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch}")
+        if 'batch_queue' not in st.session_state:
+            st.session_state.batch_queue = []
+        if 'batch_results' not in st.session_state:
+            st.session_state.batch_results = []
+        if 'batch_running' not in st.session_state:
+            st.session_state.batch_running = False
         
-        with st.expander(gt('config_data_feat', st.session_state.lang), expanded=False):
-            st.caption("Pilih versi data atau konfigurasi fitur")
+        col_bq1, col_bq2 = st.columns([1, 2])
+        
+        with col_bq1:
+            st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
+            q_arch = st.selectbox(gt('architecture', st.session_state.lang), ["patchtst", "gru", "lstm", "rnn"], key="q_arch")
+            q_name = st.text_input(gt('exp_name', st.session_state.lang), value=f"Exp_{q_arch}_{len(st.session_state.batch_queue)+1}")
             
-            # List available preprocessed versions
-            cur_dyn_str = gt('current_dynamic', st.session_state.lang)
-            proc_versions = [cur_dyn_str]
-            if os.path.exists(proc_dir):
-                dirs = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
-                proc_versions.extend(sorted(dirs, reverse=True))
-            
-            q_data_v = st.selectbox(gt('data_version_select', st.session_state.lang), proc_versions, key="q_data_v")
-            
-            st.markdown("---")
-            st.caption(gt('feature_groups_info', st.session_state.lang))
-            q_feat = cfg['features']['groups'].copy()
-            q_feat['weather'] = st.checkbox("Weather Features", value=q_feat.get('weather', True), key="q_f_w")
-            q_feat['time_hour'] = st.checkbox("Hour of Day", value=q_feat.get('time_hour', True), key="q_f_h")
-            q_feat['time_month'] = st.checkbox("Month of Year", value=q_feat.get('time_month', True), key="q_f_m")
-            q_feat['physics'] = st.checkbox("Physics (CS Index)", value=q_feat.get('physics', False), key="q_f_p")
-            q_feat_mode = st.selectbox("Selection Mode", ["auto", "manual"], key="q_f_mode")
-
-        if st.button(gt('add_to_queue', st.session_state.lang), use_container_width=True):
-            st.session_state.batch_queue.append({
-                "name": q_name,
-                "architecture": q_arch,
-                "hp": q_hp,
-                "data_version": q_data_v,
-                "features": {
-                    "groups": q_feat,
-                    "selection_mode": q_feat_mode
-                }
-            })
-            st.success(f"Added {q_name} to queue!")
-            # Removed st.rerun() to avoid killing active training processes
-
-    with col_bq2:
-        st.markdown(f"#### {gt('current_queue', st.session_state.lang)}")
-        if not st.session_state.batch_queue:
-            st.write("Antrean kosong. Tambahkan model di sebelah kiri.")
-        else:
-            for i, item in enumerate(st.session_state.batch_queue):
-                col_i1, col_i2 = st.columns([4, 1])
-                col_i1.markdown(f"**{i+1}. {item['name']}** ({item['architecture']}) | LB: {item['hp']['lookback']}, D: {item['hp']['d_model']}")
-                if col_i2.button("🗑️", key=f"del_{i}"):
-                    st.session_state.batch_queue.pop(i)
-                    st.rerun()
-            
-            st.markdown("---")
-            if st.button(gt('run_batch_btn', st.session_state.lang), type="primary", use_container_width=True):
-                batch_progress = st.progress(0)
-                status_text = st.empty()
+            with st.expander(gt('config_hp', st.session_state.lang), expanded=True):
+                q_hp = cfg['model']['hyperparameters'].copy()
                 
-                # Container for live monitor
-                monitor_container = st.container()
+                # --- Architecture Specific Labels ---
+                d_label = "d_model (Embedding)" if q_arch == "patchtst" else "Hidden Units"
+                l_label = "Transformer Blocks" if q_arch == "patchtst" else "Stacked RNN Layers"
                 
-                total = len(st.session_state.batch_queue)
+                cq1, cq2 = st.columns(2)
+                with cq1:
+                    q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key="q_lb")
+                    
+                    _d_opts = [16, 32, 64, 128, 256, 512]
+                    q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key="q_dm")
+                    q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key="q_nl")
+                    
+                with cq2:
+                    q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key="q_lr")
+                    _bs_opts = [16, 32, 64, 128]
+                    q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key="q_bs")
+                    q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key="q_dr")
+
+                # --- SPECIFIC PARAMS ---
+                if q_arch == "patchtst":
+                    st.markdown("---")
+                    sq1, sq2 = st.columns(2)
+                    with sq1:
+                        q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl")
+                        q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st")
+                    with sq2:
+                        q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp['d_model']*2), 32, key="q_ff")
+                        _h_opts = [1, 2, 4, 8, 12, 16]
+                        q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key="q_nh")
+                
+                elif q_arch in ["gru", "lstm", "rnn"]:
+                    st.markdown("---")
+                    q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch}")
+            
+            with st.expander(gt('config_data_feat', st.session_state.lang), expanded=False):
+                st.caption("Pilih versi data atau konfigurasi fitur")
+                
+                # List available preprocessed versions
+                cur_dyn_str = gt('current_dynamic', st.session_state.lang)
+                proc_versions = [cur_dyn_str]
+                if os.path.exists(proc_dir):
+                    dirs = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
+                    proc_versions.extend(sorted(dirs, reverse=True))
+                
+                q_data_v = st.selectbox(gt('data_version_select', st.session_state.lang), proc_versions, key="q_data_v")
+                
+                st.markdown("---")
+                st.caption(gt('feature_groups_info', st.session_state.lang))
+                q_feat = cfg['features']['groups'].copy()
+                q_feat['weather'] = st.checkbox("Weather Features", value=q_feat.get('weather', True), key="q_f_w")
+                q_feat['time_hour'] = st.checkbox("Hour of Day", value=q_feat.get('time_hour', True), key="q_f_h")
+                q_feat['time_month'] = st.checkbox("Month of Year", value=q_feat.get('time_month', True), key="q_f_m")
+                q_feat['physics'] = st.checkbox("Physics (CS Index)", value=q_feat.get('physics', False), key="q_f_p")
+                q_feat_mode = st.selectbox("Selection Mode", ["auto", "manual"], key="q_f_mode")
+
+            if st.button(gt('add_to_queue', st.session_state.lang), width="stretch", key="btn_add_batch_queue", disabled=st.session_state.batch_running):
+                st.session_state.batch_queue.append({
+                    "name": q_name,
+                    "architecture": q_arch,
+                    "hp": q_hp,
+                    "data_version": q_data_v,
+                    "features": {
+                        "groups": q_feat,
+                        "selection_mode": q_feat_mode
+                    }
+                })
+                # Log to CMD for debugging
+                print(f"➕ [{datetime.now().strftime('%H:%M:%S')}] Queued: {q_name} ({q_arch})")
+                import sys
+                sys.stdout.flush()
+                
+                st.success(gt('add_to_queue_success', st.session_state.lang))
+                time.sleep(0.5)
+                st.rerun()
+
+        with col_bq2:
+            st.markdown(f"#### {gt('current_queue', st.session_state.lang)}")
+            if not st.session_state.batch_queue:
+                st.write("Antrean kosong. Tambahkan model di sebelah kiri.")
+            else:
                 for i, item in enumerate(st.session_state.batch_queue):
-                    status_text.markdown(f"⏳ **Processing {i+1}/{total}:** {item['name']}...")
-                    
-                    with monitor_container:
-                        st.markdown(f"#### 🛰️ Monitoring: {item['name']}")
-                        mc1, mc2, mc3, mc4 = st.columns(4)
-                        m_epoch = mc1.empty()
-                        m_loss = mc2.empty()
-                        m_vloss = mc3.empty()
-                        m_eta = mc4.empty()
-                        m_chart = st.empty()
-                    
-                    # Setup config for this run
-                    batch_cfg = cfg.copy()
-                    batch_cfg['model']['architecture'] = item['architecture']
-                    batch_cfg['model']['hyperparameters'] = item['hp']
-                    
-                    # --- DATA VERSION SELECTION ---
-                    data_v = item.get('data_version', gt('current_dynamic', st.session_state.lang))
-                    if data_v == gt('current_dynamic', st.session_state.lang):
-                        # Logic for dynamic preprocessing
-                        if 'features' in item:
-                            status_text.markdown(f"🧹 **Re-preprocessing data for {item['name']}...**")
-                            batch_cfg['features']['groups'] = item['features']['groups']
-                            batch_cfg['features']['selection_mode'] = item['features']['selection_mode']
-                            
-                            from src.data_prep import run_preprocessing
-                            run_preprocessing(batch_cfg)
-                    else:
-                        status_text.markdown(f"📦 **Using archived data version: {data_v}**")
-                        batch_cfg['paths']['processed_dir'] = os.path.join(proc_dir, data_v)
-                    
-                    # --- LIVE CALLBACK FOR BATCH ---
-                    class BatchLiveCallback(tf.keras.callbacks.Callback):
-                        def __init__(self):
-                            super().__init__()
-                            self.epoch_data = []
-                            self.start_t = time.time()
-                        def on_epoch_end(self, epoch, logs=None):
-                            logs = logs or {}
-                            loss, vloss = logs.get('loss', 0), logs.get('val_loss', 0)
-                            total_e = self.params['epochs']
-                            elapsed = time.time() - self.start_t
-                            avg = elapsed / (epoch + 1)
-                            eta = avg * (total_e - epoch - 1)
-                            eta_s = f"{eta/60:.1f}m" if eta > 60 else f"{eta:.0f}s"
-                            
-                            m_epoch.metric("Epoch", f"{epoch+1}/{total_e}")
-                            m_loss.metric("Loss", f"{loss:.6f}")
-                            m_vloss.metric("Val Loss", f"{vloss:.6f}")
-                            m_eta.metric("ETA", eta_s)
-                            
-                            self.epoch_data.append({'e': epoch+1, 'l': loss, 'v': vloss})
-                            fig = go.Figure()
-                            ee = [d['e'] for d in self.epoch_data]
-                            fig.add_trace(go.Scatter(x=ee, y=[d['l'] for d in self.epoch_data], name='Train', line=dict(color='#818cf8')))
-                            fig.add_trace(go.Scatter(x=ee, y=[d['v'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6')))
-                            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=20,r=20,t=30,b=20),
-                                              title=f"Loss Curve: {item['name']}", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                            m_chart.plotly_chart(fig, use_container_width=True)
-
-                    try:
-                        from src.trainer import train_model
-                        train_model(batch_cfg, custom_model_id=item['name'], extra_callbacks=[BatchLiveCallback()])
-                        st.write(f"✅ {item['name']} - **Selesai**")
-                    except Exception as e:
-                        st.error(f"❌ {item['name']} - **Gagal**: {e}")
-                    
-                    batch_progress.progress((i + 1) / total)
-                    # Clear monitor for next model
-                    monitor_container.empty()
+                    col_i1, col_i2 = st.columns([4, 1])
+                    col_i1.markdown(f"**{i+1}. {item['name']}** ({item['architecture']}) | LB: {item['hp']['lookback']}, D: {item['hp']['d_model']}")
+                    if col_i2.button("🗑️", key=f"del_{i}"):
+                        st.session_state.batch_queue.pop(i)
+                        st.rerun()
                 
-                st.session_state.batch_queue = []
-                status_text.success("🏁 All Batch Experiments Finished!")
-                st.balloons()
+                st.markdown("---")
+                if st.button(gt('run_batch_btn', st.session_state.lang), type="primary", width="stretch", disabled=st.session_state.batch_running):
+                    st.session_state.batch_running = True
+                    st.session_state.batch_results = [] # Reset results for new run
+                    
+                    batch_progress = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Container for live monitor (will be persistent until clear)
+                    monitor_container = st.container()
+                    
+                    total = len(st.session_state.batch_queue)
+                    for i, item in enumerate(st.session_state.batch_queue):
+                        status_text.markdown(f"⏳ **Processing {i+1}/{total}:** {item['name']}...")
+                        
+                        with monitor_container:
+                            st.markdown(f"#### 🛰️ Monitoring: {item['name']}")
+                            mc1, mc2, mc3, mc4 = st.columns(4)
+                            m_epoch = mc1.empty()
+                            m_loss = mc2.empty()
+                            m_vloss = mc3.empty()
+                            m_eta = mc4.empty()
+                            m_chart = st.empty()
+                        
+                        # Setup config for this run
+                        batch_cfg = cfg.copy()
+                        batch_cfg['model']['architecture'] = item['architecture']
+                        batch_cfg['model']['hyperparameters'] = item['hp']
+                        
+                        # --- DATA VERSION SELECTION ---
+                        data_v = item.get('data_version', gt('current_dynamic', st.session_state.lang))
+                        if data_v == gt('current_dynamic', st.session_state.lang):
+                            if 'features' in item:
+                                status_text.markdown(f"Sweep 🧹 **Preparing data for {item['name']}...**")
+                                batch_cfg['features']['groups'] = item['features']['groups']
+                                batch_cfg['features']['selection_mode'] = item['features']['selection_mode']
+                                
+                                from src.data_prep import run_preprocessing
+                                run_preprocessing(batch_cfg)
+                        else:
+                            status_text.markdown(f"📦 **Using archived data: {data_v}**")
+                            batch_cfg['paths']['processed_dir'] = os.path.join(proc_dir, data_v)
+                        
+                        # --- LIVE CALLBACK --- (using closure variables)
+                        class BatchLiveCallback(tf.keras.callbacks.Callback):
+                            def __init__(self):
+                                super().__init__()
+                                self.epoch_data = []
+                                self.start_t = time.time()
+                            def on_epoch_end(self, epoch, logs=None):
+                                logs = logs or {}
+                                loss, vloss = logs.get('loss', 0), logs.get('val_loss', 0)
+                                total_e = self.params.get('epochs', 100)
+                                elapsed = time.time() - self.start_t
+                                avg = elapsed / (epoch + 1)
+                                eta = avg * (total_e - epoch - 1)
+                                eta_s = f"{eta/60:.1f}m" if eta > 60 else f"{eta:.0f}s"
+                                
+                                m_epoch.metric("Epoch", f"{epoch+1}/{total_e}")
+                                m_loss.metric("Loss", f"{loss:.6f}")
+                                m_vloss.metric("Val Loss", f"{vloss:.6f}")
+                                m_eta.metric("ETA", eta_s)
+                                
+                                # Fix: Add explicit print to CMD for Batch experiments
+                                print(f"  > [{item['name']}] Epoch {epoch+1}/{total_e}: loss={loss:.6f}, val={vloss:.6f}")
+                                
+                                self.epoch_data.append({'e': epoch+1, 'l': loss, 'v': vloss})
+                                fig = go.Figure()
+                                ee = [d['e'] for d in self.epoch_data]
+                                fig.add_trace(go.Scatter(x=ee, y=[d['l'] for d in self.epoch_data], name='Train', line=dict(color='#818cf8')))
+                                fig.add_trace(go.Scatter(x=ee, y=[d['v'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6')))
+                                fig.update_layout(template="plotly_dark", height=300, margin=dict(l=20,r=20,t=30,b=20),
+                                                  title=f"Loss Curve: {item['name']}", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                                m_chart.plotly_chart(fig, width="stretch")
+
+                        try:
+                            from src.trainer import train_model
+                            model, history, meta = train_model(batch_cfg, custom_model_id=item['name'], extra_callbacks=[BatchLiveCallback()])
+                            st.session_state.batch_results.append({"name": item['name'], "status": "✅ Success", "loss": min(history.history['val_loss'])})
+                        except Exception as e:
+                            st.session_state.batch_results.append({"name": item['name'], "status": "❌ Failed", "error": str(e)})
+                        
+                        batch_progress.progress((i + 1) / total)
+                        # Don't empty monitor_container completely, just let it stay for a bit
+                    
+                    st.session_state.batch_queue = []
+                    st.session_state.batch_running = False
+                    status_text.success("🏁 All Batch Experiments Finished!")
+                    st.balloons()
+                    time.sleep(1)
+                    st.rerun()
+
+            # --- RESULTS SUMMARY (Visible after batch or if queue empty) ---
+            if st.session_state.batch_results:
+                st.markdown("---")
+                st.markdown("#### 🏁 Results Summary")
+                res_df = pd.DataFrame(st.session_state.batch_results)
+                st.dataframe(res_df, width="stretch")
+                if st.button("🗑️ Clear Results"):
+                    st.session_state.batch_results = []
+                    st.rerun()
+    except Exception as e:
+        st.error(f"❌ Batch Tab Error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 
 # --- TAB TUNING: TUNING MONITOR ---
@@ -1823,7 +1939,7 @@ with tab_tuning:
                 b_max = st.number_input("Batch Max", b_min, 512, b_vals[1], 2, key="b_max_new")
                 space['batch_size'] = [b_min, b_max]
 
-            if st.button("💾 Save Search Space to Master Config", use_container_width=True, key="save_ss_tuning"):
+            if st.button("💾 Save Search Space to Master Config", width="stretch", key="save_ss_tuning"):
                 cfg['tuning']['search_space'] = space
                 save_config_to_file(cfg)
                 st.success("Search space berhasil disimpan ke config.yaml!")
@@ -1835,7 +1951,7 @@ with tab_tuning:
                                    horizontal=True, key="tune_device_top",
                                    help="CPU direkomendasikan untuk menghindari OOM error pada GPU dengan VRAM terbatas.")
         with tune_col_dev2:
-            run_tune = st.button("🔥 Jalankan Optuna Tuning Baru", type="primary", use_container_width=True, 
+            run_tune = st.button("🔥 Jalankan Optuna Tuning Baru", type="primary", width="stretch", 
                                   disabled=not has_data, key="btn_tune_execute")
     else:
         st.warning("⚠️ **Optuna Tuning Belum Aktif**. Aktifkan melalui toggle 'Enable Optuna Tuning' pada sidebar di sebelah kiri.")
@@ -1945,7 +2061,7 @@ with tab_tuning:
                                    horizontal=True, key="tune_device_bottom",
                                    help="CPU direkomendasikan untuk stabilitas.")
         with tune_col_d2:
-            run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", use_container_width=True, 
+            run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", width="stretch", 
                                   disabled=not has_data, key="btn_tune_tab")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2008,7 +2124,7 @@ with tab_tuning:
             ])
             st.dataframe(space_df, width='stretch', hide_index=True)
             
-            if st.button("💾 Save Search Space to Master Config", use_container_width=True):
+            if st.button("💾 Save Search Space to Master Config", width="stretch"):
                 cfg['tuning']['search_space'] = space
                 save_config_to_file(cfg)
                 st.success("Search space berhasil disimpan ke config.yaml!")
@@ -2140,7 +2256,7 @@ with tab_eval:
                     </div>
                     """, unsafe_allow_html=True)
                 
-                if st.button("🔎 Run Evaluation for Selected Model", type="primary", use_container_width=True, key="btn_eval_tab"):
+                if st.button("🔎 Run Evaluation for Selected Model", type="primary", width="stretch", key="btn_eval_tab"):
                     with st.spinner(f"Evaluating model: {model_to_eval}..."):
                         try:
                             import gc
@@ -2651,7 +2767,7 @@ with tab_compare:
             st.markdown("#### 1. Pilih Model")
             selected_models = st.multiselect("Pilih model untuk dibandingkan:", all_models, default=all_models[:min(2, len(all_models))])
             
-            if st.button("📊 Run Comparison Analysis", type="primary", use_container_width=True):
+            if st.button("📊 Run Comparison Analysis", type="primary", width="stretch"):
                 if not selected_models:
                     st.warning("Pilih minimal satu model.")
                 else:
@@ -2781,7 +2897,7 @@ with tab_compare:
                     'R²': '{:.4f}', 'MAE': '{:.4f}', 'RMSE': '{:.4f}', 'MAPE (%)': '{:.2f}'
                 }).apply(highlight_max, subset=['R²']).apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE (%)'])
                 
-                st.dataframe(styled_df, use_container_width=True)
+                st.dataframe(styled_df, width="stretch")
                 
                 # Visualization
                 st.markdown("#### 3. Visual Comparison")
@@ -2792,14 +2908,14 @@ with tab_compare:
                                    title="R² Score (Higher is Better)",
                                    color_continuous_scale='Viridis')
                     fig_r2.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_r2, use_container_width=True)
+                    st.plotly_chart(fig_r2, width="stretch")
                 
                 with c2:
                     fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='MAE',
                                     title="MAE Score (Lower is Better)",
                                     color_continuous_scale='Reds_r')
                     fig_mae.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_mae, use_container_width=True)
+                    st.plotly_chart(fig_mae, width="stretch")
                 
                 # Radar Chart
                 st.markdown("#### 4. Performance Radar")
@@ -2828,7 +2944,7 @@ with tab_compare:
                     paper_bgcolor='rgba(0,0,0,0)',
                     height=500
                 )
-                st.plotly_chart(fig_radar, use_container_width=True)
+                st.plotly_chart(fig_radar, width="stretch")
         else:
             st.warning("Belum ada model tersimpan di folder `models/`.")
     else:

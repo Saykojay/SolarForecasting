@@ -42,7 +42,9 @@ TR = {
         'data_version_select': "Preprocessed Data Version",
         'feature_groups_info': "Feature Groups (Only if 'Current (Dynamic)' is selected)",
         'current_dynamic': "Current (Dynamic)",
-        'run_batch_btn': "🔥 Run Batch Training Now",
+        'run_batch_btn': "🔥 Run Batch Now",
+        'add_to_queue_success': "✅ Added to queue!",
+        'current_queue': "📋 Current Queue",
     },
     'ID': {
         'page_title': "Pipeline Prediksi PV",
@@ -85,6 +87,8 @@ TR = {
         'feature_groups_info': "Grup Fitur (Hanya jika 'Current (Dynamic)' dipilih)",
         'current_dynamic': "Aktif (Dinamis)",
         'run_batch_btn': "🔥 Jalankan Batch Sekarang",
+        'add_to_queue_success': "✅ Berhasil ditambah ke antrean!",
+        'current_queue': "📋 Antrean Saat Ini",
     }
 }
 

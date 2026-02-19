@@ -115,13 +115,26 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     print(f"Evaluation Context: lookback={lookback}, horizon={horizon}")
     print(f"Using Artifacts from: {proc}")
 
-    # Load data if needed (Data always comes from the ACTIVE processed dir)
+    # Load data if needed
     if data is None:
         data = {}
         
+    # --- AUTO-RESOLVE DATA SOURCE ---
+    # If the active data folder has a mismatch, we should try to load from the model's original source
+    data_proc_src = root_proc
+    if scaler_dir and os.path.exists(os.path.join(scaler_dir, 'meta.json')):
+        with open(os.path.join(scaler_dir, 'meta.json'), 'r') as f:
+            m_meta = json.load(f)
+            orig_ds = m_meta.get('data_source', '').replace('\\', '/')
+            if orig_ds and os.path.exists(orig_ds):
+                # Check if this original source is different from active root
+                if os.path.abspath(orig_ds) != os.path.abspath(root_proc):
+                    print(f"🔄 Model expects specific data. Switching data source to: {orig_ds}")
+                    data_proc_src = orig_ds
+        
     try:
-        X_train = data.get('X_train', np.load(os.path.join(root_proc, 'X_train.npy')))
-        X_test = data.get('X_test', np.load(os.path.join(root_proc, 'X_test.npy')))
+        X_train = data.get('X_train', np.load(os.path.join(data_proc_src, 'X_train.npy')))
+        X_test = data.get('X_test', np.load(os.path.join(data_proc_src, 'X_test.npy')))
         # Handle Feature Count mismatch (Common when switching Feature Engineering config)
         expected_n_features = model.input_shape[2]
         actual_n_features = X_train.shape[2]
@@ -170,7 +183,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
                                         print(f"   Recovery successful! Found feature list at: {found_path}")
                                         model_feat_path = found_path
 
-            data_feat_path = os.path.join(root_proc, 'selected_features.json')
+            data_feat_path = os.path.join(data_proc_src, 'selected_features.json')
             
             if os.path.exists(model_feat_path) and os.path.exists(data_feat_path):
                 with open(model_feat_path, 'r') as f: model_feat_list = json.load(f)
@@ -211,9 +224,9 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
             
         y_scaler = data.get('y_scaler', joblib.load(y_scaler_path))
         
-        # Dataframes are usually too big for bundles, so we stick to root_proc for these
-        df_train = data.get('df_train', pd.read_pickle(os.path.join(root_proc, 'df_train_feats.pkl')))
-        df_test = data.get('df_test', pd.read_pickle(os.path.join(root_proc, 'df_test_feats.pkl')))
+        # Dataframes are usually too big for bundles, so we stick to data_proc_src for these
+        df_train = data.get('df_train', pd.read_pickle(os.path.join(data_proc_src, 'df_train_feats.pkl')))
+        df_test = data.get('df_test', pd.read_pickle(os.path.join(data_proc_src, 'df_test_feats.pkl')))
     except Exception as e:
         if isinstance(e, ValueError): raise e
         raise ValueError(f"Gagal memuat data preprocessing: {e}. Pastikan sudah menjalankan Step 1.")
@@ -231,7 +244,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     use_csi_conversion = True
     summary_path = os.path.join(proc, 'prep_summary.json')
     if not os.path.exists(summary_path): 
-        summary_path = os.path.join(root_proc, 'prep_summary.json')
+        summary_path = os.path.join(data_proc_src, 'prep_summary.json')
         
     if os.path.exists(summary_path):
         with open(summary_path, 'r') as f:

@@ -37,9 +37,9 @@ def preprocess_algorithm1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if pcfg.get('resample_1h', True):
         if hasattr(df.index, 'freq') and df.index.freq is None:
             inferred_freq = pd.infer_freq(df.index[:100])
-            if inferred_freq and 'H' not in str(inferred_freq):
-                print(f"  Resampling dari {inferred_freq} ke 1H...")
-                df = df.resample('1H').mean()
+            if inferred_freq and 'h' not in str(inferred_freq).lower():
+                print(f"  Resampling dari {inferred_freq} ke 1h...")
+                df = df.resample('1h').mean()
 
     # 3. Handle Duplicates
     df = df[~df.index.duplicated(keep='first')]
@@ -124,7 +124,7 @@ def preprocess_algorithm1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         df[col] = df[col].clip(lower=0)
 
     # 6. Reindex & Gap Management
-    full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='1H')
+    full_range = pd.date_range(start=df.index.min(), end=df.index.max(), freq='1h')
     df = df.reindex(full_range)
     df.index.name = time_col
 
@@ -423,6 +423,13 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     print(f"\nLoading data from {cols['csv_path']}...")
     df = pd.read_csv(cols['csv_path'], sep=cols['csv_separator'])
     
+    # NEW: Data Trimming (Mangkas Data)
+    pcfg = cfg.get('preprocessing', {})
+    trim_rows = pcfg.get('trim_rows')
+    if trim_rows and isinstance(trim_rows, int) and trim_rows > 0:
+        print(f"✂️ Trimming data to first {trim_rows} rows...")
+        df = df.head(trim_rows)
+    
     # Robust date parsing
     try:
         fmt = cols.get('time_format')
@@ -512,13 +519,17 @@ def run_preprocessing(cfg: dict, version_name: str = None):
 
     print(f"\nFinal Dataset Shapes:")
     # 9. Save artifacts
-    # FIXED: Ensure we don't nest versions if the current processed_dir is already a version folder
-    # FIXED: Recursively find root to avoid nesting sub-versions inside versions
-    raw_root = cfg['paths']['processed_dir']
+    # FIXED: Recursively find 'processed' root to avoid nesting sub-versions inside versions
+    raw_root = os.path.abspath(cfg['paths']['processed_dir'])
     root_out_dir = raw_root
-    while os.path.basename(root_out_dir).startswith(('version_', 'v_')) or "version_" in os.path.basename(root_out_dir):
+    
+    while True:
+        bname = os.path.basename(root_out_dir).lower()
+        if bname == 'processed':
+            break
         parent = os.path.dirname(root_out_dir)
-        if not parent or parent == root_out_dir: break
+        if not parent or parent == root_out_dir:
+            break
         root_out_dir = parent
 
     # Create shortened versioned directory to avoid path-too-long issues

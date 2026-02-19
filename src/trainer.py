@@ -15,6 +15,9 @@ import logging
 import joblib
 
 logger = logging.getLogger(__name__)
+# Ensure basic logging is configured if not already
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 def _get_callbacks(cfg: dict):
@@ -47,6 +50,10 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     # Load data jika belum di-pass
     if data is None:
         proc = cfg['paths']['processed_dir']
+        print(f"📂 Loading data from {proc}...")
+        import sys
+        sys.stdout.flush()
+        
         data = {
             'X_train': np.load(os.path.join(proc, 'X_train.npy')),
             'y_train': np.load(os.path.join(proc, 'y_train.npy')),
@@ -54,8 +61,11 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
             'y_test': np.load(os.path.join(proc, 'y_test.npy')),
             'n_features': None,  # akan dideteksi dari shape
         }
-    print(f"\nUsing hyperparameters: {hp}")
+    
+    print(f"📊 Data shapes: X={data['X_train'].shape}, y={data['y_train'].shape}")
+    print(f"Using hyperparameters: {hp}")
     print(f"Architecture: {arch}")
+    sys.stdout.flush()
 
     # Handle lookback mismatch (Lookback in config vs Lookback in preprocessed data)
     actual_data_lookback = data['X_train'].shape[1]
@@ -83,28 +93,30 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     import time
     start_time = time.time()
     
+    # Create model folder for bundling
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+    model_id = custom_model_id if custom_model_id else f"{arch}_{timestamp}"
+    
+    root_model_dir = cfg['paths']['models_dir']
+    model_folder = os.path.join(root_model_dir, model_id)
+    os.makedirs(model_folder, exist_ok=True)
+
+    print(f"\n🚀 Start Training Model: {model_id}")
+    print(f"   (Please wait for the first epoch log, it may take a moment...)")
+    import sys
+    sys.stdout.flush()
+
     history = model.fit(
         data['X_train'], data['y_train'],
         validation_data=(data['X_test'], data['y_test']),
         epochs=cfg['training']['epochs'],
         batch_size=hp['batch_size'],
         callbacks=cbs,
-        verbose=1
+        verbose=2 # One line per epoch is more stable for CMD logging
     )
     
     end_time = time.time()
     training_duration = end_time - start_time
-
-    # Create model folder for bundling
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-    if custom_model_id:
-        model_id = custom_model_id
-    else:
-        model_id = f"{arch}_{timestamp}"
-    
-    root_model_dir = cfg['paths']['models_dir']
-    model_folder = os.path.join(root_model_dir, model_id)
-    os.makedirs(model_folder, exist_ok=True)
 
     # Save model
     model_path = os.path.join(model_folder, "model.keras")
