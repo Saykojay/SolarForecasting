@@ -13,6 +13,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
+from src.lang import gt
 
 # Ensure src/ is importable
 sys.path.insert(0, os.path.dirname(__file__))
@@ -143,6 +144,15 @@ st.markdown("""
     }
     .status-ready { background: #065f46; color: #6ee7b7; }
     .status-missing { background: #7f1d1d; color: #fca5a5; }
+    
+    /* Fix for selectbox scrolling and visibility */
+    div[data-baseweb="popover"] {
+        z-index: 10000 !important;
+    }
+    div[data-baseweb="menu"] {
+        max-height: 350px !important;
+        overflow-y: auto !important;
+    }
     
     /* Sidebar styling */
     [data-testid="stSidebar"] {
@@ -364,15 +374,32 @@ if 'is_running' not in st.session_state:
     st.session_state.is_running = False
 if 'selected_model' not in st.session_state:
     st.session_state.selected_model = load_selected_model()
+if 'lang' not in st.session_state:
+    st.session_state.lang = 'ID' # Default to Indonesian
 
 cfg = st.session_state.cfg
-# FIXED: Recursively find root to avoid nesting sub-versions inside versions
+# IMPROVED: Robustly find the 'processed' root directory
 raw_root = cfg['paths']['processed_dir']
-root_out_dir = raw_root
-while os.path.basename(root_out_dir).startswith(('version_', 'v_')) or "version_" in os.path.basename(root_out_dir):
+root_out_dir = os.path.abspath(raw_root)
+
+# If we are inside a versioned folder (v1_, v_ atau version_), go up to find the 'processed' base
+while True:
+    bname = os.path.basename(root_out_dir).lower()
+    # Check if current folder looks like a version
+    is_version = bname.startswith(('v', 'version_')) or "version_" in bname
+    # But don't go up if we are already at the 'processed' folder
+    if bname == 'processed':
+        break
+    
     parent = os.path.dirname(root_out_dir)
-    if not parent or parent == root_out_dir: break
-    root_out_dir = parent
+    if not parent or parent == root_out_dir: 
+        break
+    
+    if is_version or bname != 'processed':
+        root_out_dir = parent
+    else:
+        break
+
 proc_dir = root_out_dir
 
 model_dir = cfg['paths']['models_dir']
@@ -383,7 +410,16 @@ target_dir = cfg['paths']['target_data_dir']
 # SIDEBAR - CONFIGURATION
 # ============================================================
 with st.sidebar:
-    st.markdown("## ⚙️ Konfigurasi Pipeline")
+    # --- LANGUAGE SELECTOR ---
+    st.markdown(f"### {gt('lang_select', st.session_state.lang)}")
+    sel_lang = st.radio("Select Language", ["ID", "EN"], 
+                        index=0 if st.session_state.lang == 'ID' else 1, 
+                        horizontal=True, label_visibility="collapsed")
+    if sel_lang != st.session_state.lang:
+        st.session_state.lang = sel_lang
+        st.rerun()
+
+    st.markdown(f"## {gt('sidebar_settings', st.session_state.lang)}")
     
     # GPU status indicator & Debug
     try:
@@ -484,55 +520,55 @@ with st.sidebar:
 # ============================================================
 # MAIN AREA - HEADER
 # ============================================================
-st.markdown("""
+# Status Cards & Definitions
+new_arch = cfg['model'].get('architecture', 'patchtst')
+has_data = os.path.exists(os.path.join(proc_dir, 'X_train.npy'))
+has_model = any(f.endswith(('.keras', '.h5')) for f in os.listdir(model_dir)) if os.path.exists(model_dir) else False
+has_target = any(f.endswith('.csv') for f in os.listdir(target_dir)) if os.path.exists(target_dir) else False
+
+st.markdown(f"""
 <div style="text-align:center; margin-bottom: 2rem;">
     <h1 style="font-family: 'Manrope', sans-serif;
                background: linear-gradient(135deg, #818cf8, #6366f1, #4f46e5); 
                -webkit-background-clip: text; -webkit-text-fill-color: transparent;
                font-size: 2.5rem; font-weight: 800; letter-spacing: -0.03em;
                margin-bottom: 0.5rem;">
-        PV Forecasting Pipeline
+        {gt('page_title', st.session_state.lang)}
     </h1>
     <p style="font-family: 'Manrope', sans-serif; color: #64748b; 
               font-size: 1.1rem; font-weight: 400;">
-        Universal Dashboard &mdash; PatchTST, GRU, dan lainnya
+        Universal Dashboard &mdash; PatchTST, GRU, {gt('active_arch', st.session_state.lang)}: {new_arch.upper()}
     </p>
 </div>
 """, unsafe_allow_html=True)
-
-# Status Cards
-new_arch = cfg['model'].get('architecture', 'patchtst')
-has_data = os.path.exists(os.path.join(proc_dir, 'X_train.npy'))
-has_model = any(f.endswith(('.keras', '.h5')) for f in os.listdir(model_dir)) if os.path.exists(model_dir) else False
-has_target = any(f.endswith('.csv') for f in os.listdir(target_dir)) if os.path.exists(target_dir) else False
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     status = "ready" if has_data else "missing"
     st.markdown(f"""<div class="metric-card">
         <div class="metric-value">{"✅" if has_data else "⏳"}</div>
-        <div class="metric-label">Data Preprocessed</div>
-        <span class="status-badge status-{status}">{"Ready" if has_data else "Belum"}</span>
+        <div class="metric-label">{gt('data_preprocessed', st.session_state.lang)}</div>
+        <span class="status-badge status-{status}">{gt('status_ready', st.session_state.lang) if has_data else gt('status_missing', st.session_state.lang)}</span>
     </div>""", unsafe_allow_html=True)
 with col2:
     status = "ready" if has_model else "missing"
     st.markdown(f"""<div class="metric-card">
         <div class="metric-value">{"✅" if has_model else "⏳"}</div>
-        <div class="metric-label">Model Terlatih</div>
-        <span class="status-badge status-{status}">{"Ready" if has_model else "Belum"}</span>
+        <div class="metric-label">{gt('model_trained', st.session_state.lang)}</div>
+        <span class="status-badge status-{status}">{gt('status_ready', st.session_state.lang) if has_model else gt('status_missing', st.session_state.lang)}</span>
     </div>""", unsafe_allow_html=True)
 with col3:
     status = "ready" if has_target else "missing"
     st.markdown(f"""<div class="metric-card">
         <div class="metric-value">{"📂" if has_target else "⏳"}</div>
-        <div class="metric-label">Data Target</div>
-        <span class="status-badge status-{status}">{"Ada" if has_target else "Belum"}</span>
+        <div class="metric-label">{gt('target_data', st.session_state.lang)}</div>
+        <span class="status-badge status-{status}">{gt('status_present', st.session_state.lang) if has_target else gt('status_missing', st.session_state.lang)}</span>
     </div>""", unsafe_allow_html=True)
 with col4:
     st.markdown(f"""<div class="metric-card">
         <div class="metric-value">{new_arch.upper()}</div>
-        <div class="metric-label">Arsitektur Aktif</div>
-        <span class="status-badge status-ready">Selected</span>
+        <div class="metric-label">{gt('active_arch', st.session_state.lang)}</div>
+        <span class="status-badge status-ready">{gt('status_ready', st.session_state.lang)}</span>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -541,99 +577,51 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ============================================================
 # TABS
 # ============================================================
-tab_lab, tab_prep, tab_data, tab_tuning, tab2, tab3, tab4, tab1, tab_compare, tab5 = st.tabs([
-    "🧪 Feature Lab",
-    "📥 Preprocessing",
-    "🔎 Data Insights",
-    "🎯 Tuning",
-    "🧠 Training Center",
-    "📈 Evaluation",
-    "📦 Target Test",
-    "🚀 Runner",
-    "🏆 Comparison",
-    "📋 Logs",
+tab_data, tab_prep_features, tab_train, tab_batch, tab_tuning, tab_eval, tab_compare, tab_transfer, tab_troubleshoot = st.tabs([
+    gt('data_insights', st.session_state.lang),
+    gt('data_prep', st.session_state.lang),
+    gt('training_center', st.session_state.lang),
+    gt('batch_experiments', st.session_state.lang),
+    gt('optuna_tuning', st.session_state.lang),
+    gt('prediction_eval', st.session_state.lang),
+    gt('leaderboard', st.session_state.lang),
+    gt('target_testing', st.session_state.lang),
+    gt('troubleshooting', st.session_state.lang)
 ])
 
-# --- NEW TAB: FEATURE LAB ---
-with tab_lab:
-    st.markdown("### 🧪 Feature Engineering Lab")
-    st.markdown("Eksperimen dengan kombinasi fitur untuk meningkatkan performa model.")
+# --- TAB: DATA PREP & FEATURES ---
+with tab_prep_features:
+    st.markdown("### 🛠️ Data Preparation & Feature Engineering")
+    st.markdown("Ubah data mentah (CSV) menjadi tensor siap train dengan fitur yang optimal.")
     
-    # --- Preset Manager ---
-    with st.expander("📂 Preset Manager (Save/Log Templates)", expanded=True):
+    # --- SUB-SECTION 1: FEATURE LAB ---
+    with st.expander("🧪 Feature Engineering Lab (Preset Manager)", expanded=True):
+        st.markdown("Eksperimen dengan kombinasi fitur dan simpan sebagai preset.")
         p1, p2 = st.columns([2, 1])
         with p1:
             presets = list_feature_presets()
-            selected_preset = st.selectbox("Pilih Preset untuk Dimuat", ["-- Silakan Pilih --"] + presets)
+            selected_preset = st.selectbox("Pilih Preset untuk Dimuat", ["-- Silakan Pilih --"] + presets, key="prep_f_preset")
             if selected_preset != "-- Silakan Pilih --":
-                if st.button("📥 Load Preset"):
+                if st.button("📥 Load Preset", key="btn_load_f"):
                     loaded = load_feature_preset(selected_preset)
                     if loaded:
-                        # Update the session config directly
                         cfg['features'].update(loaded.get('features', {}))
                         cfg['target'].update(loaded.get('target', {}))
                         st.success(f"Preset '{selected_preset}' berhasil dimuat!")
                         st.session_state.cfg = cfg
                         st.rerun()
         with p2:
-            new_preset_name = st.text_input("Simpan sebagai Preset Baru", placeholder="v1_lags_only")
-            if st.button("💾 Save to Log/Presets"):
+            new_preset_name = st.text_input("Simpan Preset Baru", placeholder="v1_lags_only", key="prep_new_p")
+            if st.button("💾 Save as Preset", key="btn_save_f"):
                 if new_preset_name.strip():
                     save_feature_preset(new_preset_name.strip(), cfg)
-                    st.success(f"Konfigurasi '{new_preset_name}' telah di-log dan disimpan!")
+                    st.success(f"Preset '{new_preset_name}' disimpan!")
                     st.rerun()
-                else:
-                    st.error("Nama preset tidak boleh kosong!")
-    
+
     st.markdown("---")
-    
-    col_l, col_r = st.columns([1, 1.5])
-    
-    with col_l:
-        st.subheader("1. Preset Overrides")
-        st.info("Gunakan Preset Manager di atas untuk memuat konfigurasi cepat. Detail fitur dapat disesuaikan di tab Preprocessing.")
-        
-    with col_r:
-        st.subheader("2. Selection Strategy")
-        s_mode = st.radio("Mode Seleksi", ["auto", "manual"], 
-                          index=0 if cfg['features'].get('selection_mode', 'auto') == 'auto' else 1,
-                          help="Auto: Menggunakan korelasi & statistik. Manual: User memilih daftar fitur.")
-        cfg['features']['selection_mode'] = s_mode
-        
-        if s_mode == "auto":
-            st.info("Sistem akan memilih fitur yang memiliki korelasi tinggi ke target dan membuang fitur yang duplikat.")
-            cfg['features']['corr_threshold'] = st.slider(
-                "Minimum Korelasi (Pearson)", 0.0, 0.5, 
-                cfg['features'].get('corr_threshold', 0.05), 0.05
-            )
-            cfg['features']['multicol_threshold'] = st.slider(
-                "Maksimum Multikolinearitas", 0.7, 1.0, 
-                cfg['features'].get('multicol_threshold', 0.95), 0.05
-            )
-        else:
-            candidate_features = []
-            if st.session_state.get('prep_metadata'):
-                candidate_features = st.session_state.prep_metadata.get('all_features', [])
-            
-            if candidate_features:
-                selected_man = st.multiselect(
-                    "Daftar Fitur yang Tersedia", 
-                    options=candidate_features,
-                    default=[f for f in cfg['features'].get('manual_features', []) if f in candidate_features]
-                )
-                cfg['features']['manual_features'] = selected_man
-                st.success(f"Daftar manual: {len(selected_man)} fitur aktif.")
-            else:
-                st.warning("⚠️ Belum ada metadata fitur. Jalankan 'Run Preprocessing' sekali dengan mode Auto terlebih dahulu.")
 
-    st.warning("⚠️ **Penting**: Setelah mengubah pengaturan di sini, Anda WAJIB menjalankan ulang **Step 1 (Preprocessing)** di tab 'Runner' sebelum melakukan Training.")
-    
-    if st.button("💾 Simpan Konfigurasi Fitur"):
-        save_config_to_file(cfg)
-        st.toast("Konfigurasi fitur berhasil disimpan!", icon="✅")
-
-# --- NEW TAB: PREPROCESSING ---
-with tab_prep:
+    # --- SUB-SECTION 2: PREPROCESSING ---
+    st.markdown("#### 📥 Pipeline Preprocessing")
     st.markdown("### 📥 Data Preprocessing")
     st.markdown("Ubah data mentah (CSV) menjadi tensor siap train.")
     
@@ -765,6 +753,12 @@ with tab_prep:
                                    help="Fitur dengan korelasi < threshold akan dibuang.",
                                    key="p_corr_th")
                 cfg['features']['corr_threshold'] = corr_th
+                
+                multicol_th = st.slider("Multicollinearity Threshold", 0.7, 1.0, 
+                                       cfg['features'].get('multicol_threshold', 0.95), 0.01,
+                                       help="Fitur dengan korelasi antar-fitur > threshold akan dibuang (mencegah redundancy).",
+                                       key="p_multicol_th")
+                cfg['features']['multicol_threshold'] = multicol_th
 
             st.markdown("##### 📐 Data Split & Scaling")
             c_s1, c_s2 = st.columns(2)
@@ -854,6 +848,7 @@ with tab_prep:
         st.markdown('<div class="pipeline-step">', unsafe_allow_html=True)
         st.markdown("**Run Preprocessing Pipeline**")
         st.caption("Proses ini akan menghasilkan file .npy dan scaler di folder data/processed.")
+        v_name_prep = st.text_input("Nama Versi (Opsional)", placeholder="misal: v1_weather_only", key="v_name_prep")
         run_preprocess = st.button("▶️ Start Preprocessing", type="primary", use_container_width=True, key="btn_prep_main")
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -875,7 +870,9 @@ with tab_prep:
                 from src.data_prep import run_preprocessing
                 stdout_capture = io.StringIO()
                 with contextlib.redirect_stdout(stdout_capture):
-                    metadata = run_preprocessing(cfg)
+                    # Pass the custom version name if provided
+                    v_name = v_name_prep.strip() if v_name_prep.strip() else None
+                    metadata = run_preprocessing(cfg, version_name=v_name)
                 st.session_state.prep_metadata = metadata
                 st.session_state.last_prep_log = stdout_capture.getvalue()
                 st.session_state.pipeline_log.append(
@@ -890,8 +887,8 @@ with tab_prep:
                 import traceback
                 st.code(traceback.format_exc())
 
-# --- TAB 1: PIPELINE RUNNER ---
-with tab1:
+# --- TAB: EVALUATION RUNNER ---
+with tab_eval:
     st.markdown("### Pipeline Runner")
     
     # Show last prep log if available
@@ -1236,15 +1233,15 @@ with tab_data:
         st.info("Belum ada data preprocessing. Silakan jalankan 'Step 1: Preprocessing' pada tab Runner.")
 
 
-# --- TAB 2: TRAINING CENTER ---
-with tab2:
+# --- TAB: TRAINING CENTER ---
+with tab_train:
     st.markdown("### 🧠 Training Center")
     
     # --- DATA VERSION SELECTOR ---
     with st.expander("📦 Pilih Versi Data Preprocessed", expanded=not has_data):
         # Always use the root processed directory for listing
         if os.path.exists(proc_dir):
-            versions = [f for f in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, f)) and (f.startswith('version_') or f.startswith('v_'))]
+            versions = [f for f in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, f)) and os.path.exists(os.path.join(proc_dir, f, 'X_train.npy'))]
             versions = sorted(versions, reverse=True)
             options = ["Latest (Default)"] + versions
             
@@ -1381,11 +1378,12 @@ with tab2:
         with c1:
             device = st.radio("Device", ["GPU", "CPU"], index=0 if st.session_state.get('execution_device', 'GPU') == 'GPU' else 1, horizontal=True)
             st.session_state.execution_device = device
+            m_name_train = st.text_input("Nama Model (ID)", placeholder="misal: patchtst_v1_exp1", key="m_name_train")
         with c2:
             st.write("") # mapping
             run_train = st.button("🚀 Start Model Training", type="primary", use_container_width=True, disabled=not has_data)
         st.markdown('</div>', unsafe_allow_html=True)
-        
+    
     with col_ctrl2:
         st.markdown("**Status**")
         if has_data:
@@ -1455,7 +1453,9 @@ with tab2:
                 tf.keras.backend.clear_session()
                 live_cb = StreamlitLiveCallback()
                 from src.trainer import train_model
-                model, history, meta = train_model(cfg, extra_callbacks=[live_cb])
+                
+                custom_id = m_name_train.strip() if m_name_train.strip() else None
+                model, history, meta = train_model(cfg, extra_callbacks=[live_cb], custom_model_id=custom_id)
                 
                 # Success & Persist
                 st.session_state.training_history = history.history
@@ -1508,6 +1508,190 @@ with tab2:
             from src.trainer import run_tscv
             res = run_tscv(cfg)
             st.dataframe(pd.DataFrame(res))
+
+# --- TAB BATCH: SEQUENTIAL TRAINING ---
+with tab_batch:
+    st.markdown(f"### {gt('batch_manager_title', st.session_state.lang)}")
+    st.info(gt('batch_info', st.session_state.lang))
+    
+    if 'batch_queue' not in st.session_state:
+        st.session_state.batch_queue = []
+    
+    col_bq1, col_bq2 = st.columns([1, 2])
+    
+    with col_bq1:
+        st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
+        q_arch = st.selectbox(gt('architecture', st.session_state.lang), ["patchtst", "gru", "lstm", "rnn"], key="q_arch")
+        q_name = st.text_input(gt('exp_name', st.session_state.lang), value=f"Exp_{q_arch}_{len(st.session_state.batch_queue)+1}")
+        
+        with st.expander(gt('config_hp', st.session_state.lang), expanded=True):
+            q_hp = cfg['model']['hyperparameters'].copy()
+            
+            # --- Architecture Specific Labels ---
+            d_label = "d_model (Embedding)" if q_arch == "patchtst" else "Hidden Units"
+            l_label = "Transformer Blocks" if q_arch == "patchtst" else "Stacked RNN Layers"
+            
+            cq1, cq2 = st.columns(2)
+            with cq1:
+                q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key="q_lb")
+                
+                _d_opts = [16, 32, 64, 128, 256, 512]
+                q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key="q_dm")
+                q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key="q_nl")
+                
+            with cq2:
+                q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key="q_lr")
+                _bs_opts = [16, 32, 64, 128]
+                q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key="q_bs")
+                q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key="q_dr")
+
+            # --- SPECIFIC PARAMS ---
+            if q_arch == "patchtst":
+                st.markdown("---")
+                sq1, sq2 = st.columns(2)
+                with sq1:
+                    q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl")
+                    q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st")
+                with sq2:
+                    q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp['d_model']*2), 32, key="q_ff")
+                    _h_opts = [1, 2, 4, 8, 12, 16]
+                    q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key="q_nh")
+            
+            elif q_arch in ["gru", "lstm", "rnn"]:
+                st.markdown("---")
+                q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch}")
+        
+        with st.expander(gt('config_data_feat', st.session_state.lang), expanded=False):
+            st.caption("Pilih versi data atau konfigurasi fitur")
+            
+            # List available preprocessed versions
+            cur_dyn_str = gt('current_dynamic', st.session_state.lang)
+            proc_versions = [cur_dyn_str]
+            if os.path.exists(proc_dir):
+                dirs = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
+                proc_versions.extend(sorted(dirs, reverse=True))
+            
+            q_data_v = st.selectbox(gt('data_version_select', st.session_state.lang), proc_versions, key="q_data_v")
+            
+            st.markdown("---")
+            st.caption(gt('feature_groups_info', st.session_state.lang))
+            q_feat = cfg['features']['groups'].copy()
+            q_feat['weather'] = st.checkbox("Weather Features", value=q_feat.get('weather', True), key="q_f_w")
+            q_feat['time_hour'] = st.checkbox("Hour of Day", value=q_feat.get('time_hour', True), key="q_f_h")
+            q_feat['time_month'] = st.checkbox("Month of Year", value=q_feat.get('time_month', True), key="q_f_m")
+            q_feat['physics'] = st.checkbox("Physics (CS Index)", value=q_feat.get('physics', False), key="q_f_p")
+            q_feat_mode = st.selectbox("Selection Mode", ["auto", "manual"], key="q_f_mode")
+
+        if st.button(gt('add_to_queue', st.session_state.lang), use_container_width=True):
+            st.session_state.batch_queue.append({
+                "name": q_name,
+                "architecture": q_arch,
+                "hp": q_hp,
+                "data_version": q_data_v,
+                "features": {
+                    "groups": q_feat,
+                    "selection_mode": q_feat_mode
+                }
+            })
+            st.success(f"Added {q_name} to queue!")
+            # Removed st.rerun() to avoid killing active training processes
+
+    with col_bq2:
+        st.markdown(f"#### {gt('current_queue', st.session_state.lang)}")
+        if not st.session_state.batch_queue:
+            st.write("Antrean kosong. Tambahkan model di sebelah kiri.")
+        else:
+            for i, item in enumerate(st.session_state.batch_queue):
+                col_i1, col_i2 = st.columns([4, 1])
+                col_i1.markdown(f"**{i+1}. {item['name']}** ({item['architecture']}) | LB: {item['hp']['lookback']}, D: {item['hp']['d_model']}")
+                if col_i2.button("🗑️", key=f"del_{i}"):
+                    st.session_state.batch_queue.pop(i)
+                    st.rerun()
+            
+            st.markdown("---")
+            if st.button(gt('run_batch_btn', st.session_state.lang), type="primary", use_container_width=True):
+                batch_progress = st.progress(0)
+                status_text = st.empty()
+                
+                # Container for live monitor
+                monitor_container = st.container()
+                
+                total = len(st.session_state.batch_queue)
+                for i, item in enumerate(st.session_state.batch_queue):
+                    status_text.markdown(f"⏳ **Processing {i+1}/{total}:** {item['name']}...")
+                    
+                    with monitor_container:
+                        st.markdown(f"#### 🛰️ Monitoring: {item['name']}")
+                        mc1, mc2, mc3, mc4 = st.columns(4)
+                        m_epoch = mc1.empty()
+                        m_loss = mc2.empty()
+                        m_vloss = mc3.empty()
+                        m_eta = mc4.empty()
+                        m_chart = st.empty()
+                    
+                    # Setup config for this run
+                    batch_cfg = cfg.copy()
+                    batch_cfg['model']['architecture'] = item['architecture']
+                    batch_cfg['model']['hyperparameters'] = item['hp']
+                    
+                    # --- DATA VERSION SELECTION ---
+                    data_v = item.get('data_version', gt('current_dynamic', st.session_state.lang))
+                    if data_v == gt('current_dynamic', st.session_state.lang):
+                        # Logic for dynamic preprocessing
+                        if 'features' in item:
+                            status_text.markdown(f"🧹 **Re-preprocessing data for {item['name']}...**")
+                            batch_cfg['features']['groups'] = item['features']['groups']
+                            batch_cfg['features']['selection_mode'] = item['features']['selection_mode']
+                            
+                            from src.data_prep import run_preprocessing
+                            run_preprocessing(batch_cfg)
+                    else:
+                        status_text.markdown(f"📦 **Using archived data version: {data_v}**")
+                        batch_cfg['paths']['processed_dir'] = os.path.join(proc_dir, data_v)
+                    
+                    # --- LIVE CALLBACK FOR BATCH ---
+                    class BatchLiveCallback(tf.keras.callbacks.Callback):
+                        def __init__(self):
+                            super().__init__()
+                            self.epoch_data = []
+                            self.start_t = time.time()
+                        def on_epoch_end(self, epoch, logs=None):
+                            logs = logs or {}
+                            loss, vloss = logs.get('loss', 0), logs.get('val_loss', 0)
+                            total_e = self.params['epochs']
+                            elapsed = time.time() - self.start_t
+                            avg = elapsed / (epoch + 1)
+                            eta = avg * (total_e - epoch - 1)
+                            eta_s = f"{eta/60:.1f}m" if eta > 60 else f"{eta:.0f}s"
+                            
+                            m_epoch.metric("Epoch", f"{epoch+1}/{total_e}")
+                            m_loss.metric("Loss", f"{loss:.6f}")
+                            m_vloss.metric("Val Loss", f"{vloss:.6f}")
+                            m_eta.metric("ETA", eta_s)
+                            
+                            self.epoch_data.append({'e': epoch+1, 'l': loss, 'v': vloss})
+                            fig = go.Figure()
+                            ee = [d['e'] for d in self.epoch_data]
+                            fig.add_trace(go.Scatter(x=ee, y=[d['l'] for d in self.epoch_data], name='Train', line=dict(color='#818cf8')))
+                            fig.add_trace(go.Scatter(x=ee, y=[d['v'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6')))
+                            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=20,r=20,t=30,b=20),
+                                              title=f"Loss Curve: {item['name']}", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                            m_chart.plotly_chart(fig, use_container_width=True)
+
+                    try:
+                        from src.trainer import train_model
+                        train_model(batch_cfg, custom_model_id=item['name'], extra_callbacks=[BatchLiveCallback()])
+                        st.write(f"✅ {item['name']} - **Selesai**")
+                    except Exception as e:
+                        st.error(f"❌ {item['name']} - **Gagal**: {e}")
+                    
+                    batch_progress.progress((i + 1) / total)
+                    # Clear monitor for next model
+                    monitor_container.empty()
+                
+                st.session_state.batch_queue = []
+                status_text.success("🏁 All Batch Experiments Finished!")
+                st.balloons()
 
 
 # --- TAB TUNING: TUNING MONITOR ---
@@ -1926,8 +2110,10 @@ with tab_tuning:
         st.rerun()
 
 
-# --- TAB 3: EVALUATION & RESULTS ---
-with tab3:
+# --- TAB: EVALUATION RESULTS ---
+with tab_eval:
+    st.markdown("---")
+    st.markdown("#### 📈 Deep Evaluation Analysis")
     st.markdown("### Evaluation & Results")
     
     # --- MODEL SELECTOR FOR EVALUATION ---
@@ -2391,8 +2577,8 @@ with tab3:
         st.info("Belum ada hasil evaluasi. Jalankan Evaluate atau Full Pipeline terlebih dahulu.")
 
 
-# --- TAB 4: TARGET TESTING ---
-with tab4:
+# --- TAB: TARGET TESTING ---
+with tab_transfer:
     st.markdown("### Target Domain Testing")
     st.markdown("Uji model terlatih pada data dari lokasi berbeda (misal: Indonesia).")
     
@@ -2649,8 +2835,8 @@ with tab_compare:
         st.error("Folder models/ tidak ditemukan.")
 
 
-# --- TAB 5: LOGS ---
-with tab5:
+# --- TAB: TROUBLESHOOTING & LOGS ---
+with tab_troubleshoot:
     st.markdown("### Pipeline Logs")
     
     if st.session_state.pipeline_log:

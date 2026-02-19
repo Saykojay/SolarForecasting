@@ -35,7 +35,7 @@ def _get_callbacks(cfg: dict):
 # ============================================================
 # STANDARD TRAINING
 # ============================================================
-def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
+def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, custom_model_id: str = None):
     """Melatih model dengan hyperparameters dari config."""
     from src.model_factory import build_model, compile_model
 
@@ -97,7 +97,11 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
 
     # Create model folder for bundling
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-    model_id = f"{arch}_{timestamp}"
+    if custom_model_id:
+        model_id = custom_model_id
+    else:
+        model_id = f"{arch}_{timestamp}"
+    
     root_model_dir = cfg['paths']['models_dir']
     model_folder = os.path.join(root_model_dir, model_id)
     os.makedirs(model_folder, exist_ok=True)

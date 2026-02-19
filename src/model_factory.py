@@ -27,8 +27,12 @@ class RevIN(tf.keras.layers.Layer):
             self.std = tf.math.reduce_std(x, axis=1, keepdims=True) + self.eps
             return (x - self.mean) / self.std
         else: # denorm
-            # Assumes x is the normalized prediction
             return x * self.std + self.mean
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"eps": self.eps})
+        return config
 
 class PatchEmbedding(tf.keras.layers.Layer):
     def __init__(self, patch_len, stride, d_model, **kwargs):
@@ -78,6 +82,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.d_model = d_model
         self.n_heads = n_heads
         self.ff_dim = ff_dim
+        self.dropout_rate = dropout
         
         # Paper Footnote 1 suggests BatchNorm instead of LayerNorm
         self.bn1 = BatchNormalization()

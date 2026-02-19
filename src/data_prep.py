@@ -408,7 +408,7 @@ def create_sequences_with_indices(X, y, timestamps, lookback, horizon=1):
 # ============================================================
 # FULL PREPROCESSING PIPELINE
 # ============================================================
-def run_preprocessing(cfg: dict):
+def run_preprocessing(cfg: dict, version_name: str = None):
     """Menjalankan seluruh pipeline preprocessing dan menyimpan hasilnya."""
     from src.config_loader import get_root_cols, ensure_dirs
     ensure_dirs(cfg)
@@ -526,7 +526,13 @@ def run_preprocessing(cfg: dict):
     input_filename = os.path.basename(cols['csv_path']).split('.')[0]
     # Limit filename part to 15 chars
     short_name = input_filename[:15]
-    out_dir = os.path.join(root_out_dir, f"v_{timestamp_str}_{short_name}")
+    
+    if version_name:
+        dir_name = version_name
+    else:
+        dir_name = f"v_{timestamp_str}_{short_name}"
+    
+    out_dir = os.path.join(root_out_dir, dir_name)
     os.makedirs(out_dir, exist_ok=True)
     
     def save_to(target_path):
