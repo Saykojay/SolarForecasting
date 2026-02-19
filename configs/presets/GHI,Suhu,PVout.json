@@ -1,0 +1,31 @@
+{
+  "features": {
+    "scaler_type": "minmax",
+    "target_scaler_type": "minmax",
+    "corr_threshold": 0.1,
+    "multicol_threshold": 0.9,
+    "selection_mode": "auto",
+    "manual_features": [
+      "ghi_wm2",
+      "pv_output_kw",
+      "ambient_temp_c"
+    ],
+    "groups": {
+      "weather": true,
+      "time": false,
+      "lags": true,
+      "physics": true,
+      "rolling": true,
+      "time_hour": true,
+      "time_month": true,
+      "time_doy": true,
+      "time_year": true
+    }
+  },
+  "target": {
+    "use_csi": false,
+    "csi_ghi_threshold": 50,
+    "csi_max": 1.2
+  },
+  "timestamp": "2026-02-18T18:11:52.885454"
+}

@@ -52,20 +52,32 @@ def calculate_full_metrics(actual, predicted, ghi_all=None, set_name="",
     rmse = np.sqrt(mean_squared_error(act, pred))
     r2 = r2_score(act, pred)
 
-    nonzero = act > 0.01
-    if nonzero.sum() > 0:
-        mape = np.mean(np.abs((act[nonzero] - pred[nonzero]) / act[nonzero])) * 100
+    # MAPE: use threshold at 10% of capacity to exclude near-zero values
+    # that cause MAPE to explode (e.g. 0.05 kW actual -> 200% error)
+    mape_threshold = capacity_kw * 0.10  # 10% of nameplate capacity
+    significant = act > mape_threshold
+    if significant.sum() > 0:
+        raw_pct = np.abs((act[significant] - pred[significant]) / act[significant])
+        # Cap individual errors at 100% to prevent outlier explosion
+        capped_pct = np.clip(raw_pct, 0, 1.0)
+        mape = np.mean(capped_pct) * 100
     else:
         mape = 0.0
+
+    # Weighted MAPE (WMAPE): immune to near-zero division
+    # WMAPE = sum(|error|) / sum(actual) — naturally robust
+    total_actual = np.sum(np.abs(act))
+    wmape = (np.sum(np.abs(act - pred)) / total_actual * 100) if total_actual > 0 else 0.0
 
     norm_mae = mae / capacity_kw if capacity_kw > 0 else 0
     norm_rmse = rmse / capacity_kw if capacity_kw > 0 else 0
 
     print(f"\n>>> {label} <<<")
-    print(f"  Absolute: MAE={mae:.4f} kW, RMSE={rmse:.4f} kW, R2={r2:.4f}, MAPE={mape:.2f}%")
+    print(f"  Absolute: MAE={mae:.4f} kW, RMSE={rmse:.4f} kW, R2={r2:.4f}")
+    print(f"  MAPE={mape:.2f}% (capped, >{mape_threshold:.1f}kW only), WMAPE={wmape:.2f}%")
     print(f"  Normalized: NormMAE={norm_mae:.4f} ({norm_mae*100:.2f}%), NormRMSE={norm_rmse:.4f}")
 
-    return {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape,
+    return {'mae': mae, 'rmse': rmse, 'r2': r2, 'mape': mape, 'wmape': wmape,
             'norm_mae': norm_mae, 'norm_rmse': norm_rmse}
 
 
@@ -110,7 +122,76 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     try:
         X_train = data.get('X_train', np.load(os.path.join(root_proc, 'X_train.npy')))
         X_test = data.get('X_test', np.load(os.path.join(root_proc, 'X_test.npy')))
+        # Handle Feature Count mismatch (Common when switching Feature Engineering config)
+        expected_n_features = model.input_shape[2]
+        actual_n_features = X_train.shape[2]
         
+        if expected_n_features != actual_n_features:
+            print(f"⚠️ Feature count mismatch: Model expects {expected_n_features}, Data has {actual_n_features}.")
+            
+            # Try to align if we have the feature list in the model bundle
+            model_feat_path = os.path.join(proc, 'selected_features.json')
+            
+            # If not in bundle, try to find it in the original data_source from meta
+            if not os.path.exists(model_feat_path):
+                meta_path = os.path.join(proc, 'meta.json')
+                if os.path.exists(meta_path):
+                    with open(meta_path, 'r') as f:
+                        m_data = json.load(f)
+                        orig_data_path = m_data.get('data_source', '')
+                        
+                        if orig_data_path:
+                            # 1. Try path in meta directly (normalize slashes)
+                            path_direct = orig_data_path.replace('\\', '/')
+                            candidate = os.path.join(path_direct, 'selected_features.json')
+                            
+                            if os.path.exists(candidate):
+                                model_feat_path = candidate
+                            else:
+                                # 2. Smart Recovery: Search for the leaf folder name in data/processed
+                                # This fixes broken paths caused by nesting or system moves
+                                leaf_name = os.path.basename(orig_data_path.rstrip('\\/'))
+                                if leaf_name:
+                                    print(f"   Searching for original data folder '{leaf_name}' recursively...")
+                                    # root_proc is likely the base 'data/processed' if we are here
+                                    # Let's find the absolute root of data/processed
+                                    search_root = root_proc
+                                    while os.path.basename(search_root).startswith(('v_', 'version_')):
+                                        search_root = os.path.dirname(search_root)
+                                    
+                                    found_path = None
+                                    for root, dirs, files in os.walk(search_root):
+                                        if os.path.basename(root) == leaf_name:
+                                            if 'selected_features.json' in files:
+                                                found_path = os.path.join(root, 'selected_features.json')
+                                                break
+                                    
+                                    if found_path:
+                                        print(f"   Recovery successful! Found feature list at: {found_path}")
+                                        model_feat_path = found_path
+
+            data_feat_path = os.path.join(root_proc, 'selected_features.json')
+            
+            if os.path.exists(model_feat_path) and os.path.exists(data_feat_path):
+                with open(model_feat_path, 'r') as f: model_feat_list = json.load(f)
+                with open(data_feat_path, 'r') as f: data_feat_list = json.load(f)
+                
+                # If all model features exist in the current data, we can slice
+                if all(f in data_feat_list for f in model_feat_list):
+                    print(f"   Aligning data: Extracting the {expected_n_features} features used during training...")
+                    indices = [data_feat_list.index(f) for f in model_feat_list]
+                    X_train = X_train[:, :, indices]
+                    X_test = X_test[:, :, indices]
+                else:
+                    missing = [f for f in model_feat_list if f not in data_feat_list]
+                    raise ValueError(f"Inkompatibilitas Fitur: Model ini dilatih menggunakan fitur {missing} "
+                                     f"yang tidak ada dalam data preprocessed saat ini. "
+                                     f"Silakan pilih versi data yang tepat di Training Center.")
+            else:
+                raise ValueError(f"Mismatch Fitur: Model mengharapkan {expected_n_features} fitur, "
+                                 f"tapi data memiliki {actual_n_features}. "
+                                 f"Pastikan Versi Data dan Model yang dipilih sinkron.")
+
         # Handle lookback mismatch in evaluation
         actual_data_lookback = X_train.shape[1]
         if lookback != actual_data_lookback:
@@ -122,7 +203,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
             else:
                 raise ValueError(f"Data lookback ({actual_data_lookback}) lebih kecil dari "
                                  f"ekspektasi model ({lookback}). Jalankan ulang Preprocessing Step 1.")
-        
+
         # Scaler and Dataframes: If scaler_dir exists, take pkl from there, otherwise from root_proc
         y_scaler_path = os.path.join(proc, 'y_scaler.pkl')
         if not os.path.exists(y_scaler_path): # Fallback to root if not in bundle
@@ -134,6 +215,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         df_train = data.get('df_train', pd.read_pickle(os.path.join(root_proc, 'df_train_feats.pkl')))
         df_test = data.get('df_test', pd.read_pickle(os.path.join(root_proc, 'df_test_feats.pkl')))
     except Exception as e:
+        if isinstance(e, ValueError): raise e
         raise ValueError(f"Gagal memuat data preprocessing: {e}. Pastikan sudah menjalankan Step 1.")
 
     # Predict
@@ -218,21 +300,131 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     ghi_train = df_train[ghi_col].values[train_idx_local[:, np.newaxis] + steps]
     ghi_test = df_test[ghi_col].values[test_idx_local[:, np.newaxis] + steps]
 
-    # Calculate metrics
+    # ============================================================
+    # HOUR-BASED WRAPPER: Zero out predictions during nighttime
+    # Strategy: Train on full 24h data for temporal continuity,
+    # but force predictions to 0 when GHI < threshold (no sun = no power).
+    # This eliminates nighttime "hallucination" noise from metrics.
+    # ============================================================
+    wrapper_threshold = cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)
+    night_mask_train = ghi_train < wrapper_threshold
+    night_mask_test = ghi_test < wrapper_threshold
+    
+    n_zeroed_train = night_mask_train.sum()
+    n_zeroed_test = night_mask_test.sum()
+    print(f"\n🌙 Hour-Based Wrapper (GHI < {wrapper_threshold} W/m²):")
+    print(f"  Train: {n_zeroed_train:,} predictions forced to 0 "
+          f"({n_zeroed_train/night_mask_train.size*100:.1f}%)")
+    print(f"  Test:  {n_zeroed_test:,} predictions forced to 0 "
+          f"({n_zeroed_test/night_mask_test.size*100:.1f}%)")
+    
+    pv_train_pred[night_mask_train] = 0.0
+    pv_test_pred[night_mask_test] = 0.0
+
+    # ============================================================
+    # METRICS: ALL HOURS (Primary) + Productive Hours (Secondary)
+    # ============================================================
     print("\nFINAL PERFORMANCE ANALYSIS")
+    
+    # PRIMARY: ALL hours (model gets credit for nighttime zeros via wrapper)
     m_train = calculate_full_metrics(pv_train_actual, pv_train_pred,
-                                      ghi_train, "TRAIN", pv_cfg['nameplate_capacity_kw'])
+                                      None, "TRAIN", pv_cfg['nameplate_capacity_kw'])
     m_test = calculate_full_metrics(pv_test_actual, pv_test_pred,
-                                     ghi_test, "TEST", pv_cfg['nameplate_capacity_kw'])
+                                     None, "TEST", pv_cfg['nameplate_capacity_kw'])
+    
+    # SECONDARY: Productive hours only (diagnostic)
+    m_train_prod = calculate_full_metrics(pv_train_actual, pv_train_pred,
+                                           ghi_train, "TRAIN", pv_cfg['nameplate_capacity_kw'])
+    m_test_prod = calculate_full_metrics(pv_test_actual, pv_test_pred,
+                                          ghi_test, "TEST", pv_cfg['nameplate_capacity_kw'])
+    
+    # ============================================================
+    # PER-STEP R² DIAGNOSTICS
+    # Shows how prediction quality degrades with forecast horizon
+    # ============================================================
+    per_step_r2 = {}
+    for step_idx in range(horizon):
+        step_actual = pv_test_actual[:, step_idx]
+        step_pred = pv_test_pred[:, step_idx]
+        if len(step_actual) > 10 and np.std(step_actual) > 0:
+            per_step_r2[step_idx + 1] = float(r2_score(step_actual, step_pred))
+    
+    print(f"\n📊 Per-Step R² (Test):")
+    for s in [1, 6, 12, 24]:
+        if s in per_step_r2:
+            print(f"  Step t+{s:2d}: R²={per_step_r2[s]:.4f}")
+    
+    # ============================================================
+    # PER-HOUR-OF-DAY ERROR DIAGNOSTICS
+    # Shows which clock hours are hardest to predict
+    # ============================================================
+    time_col = cfg['data']['time_col']
+    hourly_errors = {}
+    try:
+        # Get timestamps for test predictions  
+        test_timestamps = pd.to_datetime(df_test[time_col].values)
+        for step_idx in range(horizon):
+            # Get the actual clock hour for each prediction at this step
+            pred_indices = test_idx_local + step_idx
+            valid = pred_indices < len(test_timestamps)
+            if valid.sum() == 0:
+                continue
+            hours = test_timestamps[pred_indices[valid]].hour
+            actual_vals = pv_test_actual[valid, step_idx]
+            pred_vals = pv_test_pred[valid, step_idx]
+            errors = np.abs(actual_vals - pred_vals)
+            
+            for h, err, act, prd in zip(hours, errors, actual_vals, pred_vals):
+                if h not in hourly_errors:
+                    hourly_errors[h] = {'mae_sum': 0, 'count': 0, 
+                                        'actual_sum': 0, 'pred_sum': 0,
+                                        'sq_err_sum': 0, 'actual_list': [], 'pred_list': []}
+                hourly_errors[h]['mae_sum'] += err
+                hourly_errors[h]['sq_err_sum'] += err**2
+                hourly_errors[h]['count'] += 1
+                hourly_errors[h]['actual_sum'] += act
+                hourly_errors[h]['pred_sum'] += prd
+                hourly_errors[h]['actual_list'].append(act)
+                hourly_errors[h]['pred_list'].append(prd)
+        
+        # Compute final per-hour metrics
+        hourly_metrics = {}
+        for h in sorted(hourly_errors.keys()):
+            d = hourly_errors[h]
+            n = d['count']
+            h_mae = d['mae_sum'] / n
+            h_rmse = np.sqrt(d['sq_err_sum'] / n)
+            act_arr = np.array(d['actual_list'])
+            prd_arr = np.array(d['pred_list'])
+            h_r2 = float(r2_score(act_arr, prd_arr)) if np.std(act_arr) > 0 else 0.0
+            hourly_metrics[int(h)] = {'mae': round(h_mae, 4), 'rmse': round(h_rmse, 4), 
+                                       'r2': round(h_r2, 4), 'count': n}
+        
+        print(f"\n🕐 Per-Hour-of-Day Error (Test):")
+        print(f"  {'Hour':>4} | {'MAE':>8} | {'RMSE':>8} | {'R²':>8} | {'N':>6}")
+        print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*6}")
+        for h in range(24):
+            if h in hourly_metrics:
+                m = hourly_metrics[h]
+                print(f"  {h:4d} | {m['mae']:8.4f} | {m['rmse']:8.4f} | {m['r2']:8.4f} | {m['count']:6d}")
+    except Exception as e:
+        hourly_metrics = {}
+        per_step_r2 = {}
+        print(f"⚠️ Could not compute hourly diagnostics: {e}")
 
     return {
         'metrics_train': m_train, 'metrics_test': m_test,
+        'metrics_train_productive': m_train_prod, 'metrics_test_productive': m_test_prod,
+        'per_step_r2': per_step_r2,
+        'hourly_metrics': hourly_metrics,
         'pv_train_actual': pv_train_actual, 'pv_train_pred': pv_train_pred,
         'pv_test_actual': pv_test_actual, 'pv_test_pred': pv_test_pred,
         'ghi_train': ghi_train, 'ghi_test': ghi_test,
         'df_train': df_train, 'df_test': df_test,
         'train_indices': train_idx_local, 'test_indices': test_idx_local,
     }
+
+
 
 
 # ============================================================

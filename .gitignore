@@ -37,3 +37,6 @@ Thumbs.db
 # Temporary helper scripts
 _*.py
 _*.txt
+
+# Per-device local config (conda env name)
+env_config.txt

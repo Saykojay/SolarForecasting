@@ -80,6 +80,9 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
     if extra_callbacks:
         cbs.extend(extra_callbacks)
 
+    import time
+    start_time = time.time()
+    
     history = model.fit(
         data['X_train'], data['y_train'],
         validation_data=(data['X_test'], data['y_test']),
@@ -88,6 +91,9 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
         callbacks=cbs,
         verbose=1
     )
+    
+    end_time = time.time()
+    training_duration = end_time - start_time
 
     # Create model folder for bundling
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -108,13 +114,14 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
     # Copy Scalers from processed_dir to bundle (CRITICAL for Transfer Learning)
     import shutil
     proc_dir = cfg['paths']['processed_dir']
-    for s_name in ['X_scaler.pkl', 'y_scaler.pkl']:
+    for s_name in ['X_scaler.pkl', 'y_scaler.pkl', 'selected_features.json']:
         s_src = os.path.join(proc_dir, s_name)
         if os.path.exists(s_src):
             shutil.copy(s_src, os.path.join(model_folder, s_name))
-            print(f"📦 Scaler '{s_name}' dipaketkan bersama model.")
+            print(f"📦 Artifact '{s_name}' dipaketkan bersama model.")
 
     print(f"\n✅ Model Bundle disimpan di: {model_folder}")
+    print(f"⏱️ Time Elapsed: {training_duration:.2f} seconds")
 
     # Save metadata
     meta = {
@@ -125,6 +132,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
         'train_loss': float(min(history.history['loss'])),
         'val_loss': float(min(history.history['val_loss'])),
         'epochs_trained': len(history.history['loss']),
+        'training_time_seconds': round(training_duration, 2),
         'timestamp': timestamp,
         'forecast_horizon': horizon,
         'n_features': n_features,
@@ -150,12 +158,27 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None):
 # ============================================================
 # OPTUNA HYPERPARAMETER TUNING
 # ============================================================
-def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None):
+def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
     import mlflow
     from src.model_factory import build_model, compile_model
     from src.data_prep import create_sequences_with_indices
+
+    # --- FORCE CPU MODE ---
+    if force_cpu:
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+        # Disable all GPUs so TF only sees CPU
+        try:
+            tf.config.set_visible_devices([], 'GPU')
+        except Exception:
+            pass
+        logger.info("🖥️ Force CPU mode enabled for tuning.")
+        print("🖥️ Tuning berjalan dalam mode CPU (GPU dinonaktifkan).")
+    
+    # Clear any previous session
+    tf.keras.backend.clear_session()
+    gc.collect()
 
     horizon = cfg['forecasting']['horizon']
     space = cfg['tuning']['search_space']
@@ -198,8 +221,24 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
         hp['batch_size'] = trial.suggest_categorical('batch_size', space['batch_size'])
         hp['lookback'] = trial.suggest_int('lookback', space['lookback'][0], space['lookback'][1], step=space['lookback'][2])
 
+        # --- CONSTRAINT 1: patch_len must fit within lookback ---
         if hp['patch_len'] > hp['lookback']:
             hp['patch_len'] = hp['lookback'] // 2
+
+        # --- CONSTRAINT 2: stride must be <= patch_len ---
+        if hp['stride'] > hp['patch_len']:
+            hp['stride'] = hp['patch_len']
+
+        # --- CONSTRAINT 3: d_model must be divisible by n_heads ---
+        if hp['d_model'] % hp['n_heads'] != 0:
+            # Find the nearest valid n_heads (largest divisor <= current n_heads)
+            valid_heads = [h for h in space['n_heads'] if hp['d_model'] % h == 0]
+            if valid_heads:
+                hp['n_heads'] = max(valid_heads)
+            else:
+                # Fallback: use n_heads=1 or 2 (always divides)
+                hp['n_heads'] = max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
+            logger.info(f"Auto-corrected n_heads to {hp['n_heads']} (d_model={hp['d_model']})")
 
         X_full = data['X_train']
         y_full = data['y_train']
@@ -234,8 +273,6 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
         val_loss = min(history.history['val_loss'])
 
-        val_loss = min(history.history['val_loss'])
-
         try:
             with mlflow.start_run(nested=True):
                 mlflow.log_params(trial.params)
@@ -244,10 +281,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             print(f"⚠️ MLflow logging failed (ignoring): {e}")
 
         return val_loss
-    
-    # Clean up after trial (though starting next trial also cleans, this helps last trial)
-    tf.keras.backend.clear_session()
-    gc.collect()
+
 
     print("=" * 70)
     print("RUNNING HYPERPARAMETER TUNING (Optuna)")

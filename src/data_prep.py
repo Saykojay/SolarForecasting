@@ -178,43 +178,53 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     # Simpan timestamp
     df['timestamp_col'] = df.index
 
-    # 1. CLEAR SKY PV & CSI TARGET
-    print("Calculating Clear Sky PV & CSI...")
+    # 1. CLEAR SKY PV & CSI TARGET (only if use_csi=true or physics=true)
+    fg = cfg['features']['groups']
+    need_csi = target_cfg.get('use_csi', False) or fg.get('physics', False)
     
-    # POA Fallback: Use GHI if POA is not present
-    actual_poa = df[poa_col].values if poa_col in df.columns else df[ghi_col].values
-    if poa_col not in df.columns:
-        print(f"  Warning: {poa_col} missing. Using {ghi_col} as proxy.")
+    if need_csi:
+        print("Calculating Clear Sky PV & CSI...")
         
-    df['pv_clear_sky'] = calculate_clear_sky_pv(
-        ghi=df[ghi_col].values,
-        poa=actual_poa,
-        temp_ambient=df[temp_col].values,
-        wind_speed=df[wind_col].values if wind_col in df.columns else None,
-        nameplate_capacity=pv_cfg['nameplate_capacity_kw'],
-        temp_coeff=pv_cfg['temp_coeff'],
-        ref_temp=pv_cfg['ref_temp'],
-        system_efficiency=pv_cfg['system_efficiency'],
-    )
+        # POA Fallback: Use GHI if POA is not present
+        actual_poa = df[poa_col].values if poa_col in df.columns else df[ghi_col].values
+        if poa_col not in df.columns:
+            print(f"  Warning: {poa_col} missing. Using {ghi_col} as proxy.")
+            
+        df['pv_clear_sky'] = calculate_clear_sky_pv(
+            ghi=df[ghi_col].values,
+            poa=actual_poa,
+            temp_ambient=df[temp_col].values,
+            wind_speed=df[wind_col].values if wind_col in df.columns else None,
+            nameplate_capacity=pv_cfg['nameplate_capacity_kw'],
+            temp_coeff=pv_cfg['temp_coeff'],
+            ref_temp=pv_cfg['ref_temp'],
+            system_efficiency=pv_cfg['system_efficiency'],
+        )
 
-    ghi_threshold = target_cfg['csi_ghi_threshold']
-    csi_max = target_cfg['csi_max']
+        ghi_threshold = target_cfg['csi_ghi_threshold']
+        csi_max = target_cfg['csi_max']
 
-    productive_mask = df[ghi_col] > ghi_threshold
-    df['csi_target'] = 0.0
-    safe_cs = df.loc[productive_mask, 'pv_clear_sky'].replace(0, np.nan)
-    df.loc[productive_mask, 'csi_target'] = (
-        df.loc[productive_mask, target_col] / safe_cs
-    ).clip(0, csi_max)
-    df['csi_target'] = df['csi_target'].fillna(0)
+        productive_mask = df[ghi_col] > ghi_threshold
+        df['csi_target'] = 0.0
+        safe_cs = df.loc[productive_mask, 'pv_clear_sky'].replace(0, np.nan)
+        df.loc[productive_mask, 'csi_target'] = (
+            df.loc[productive_mask, target_col] / safe_cs
+        ).clip(0, csi_max)
+        df['csi_target'] = df['csi_target'].fillna(0)
 
-    productive_csi = df.loc[productive_mask, 'csi_target']
-    print(f"  CSI stats (productive hours):")
-    print(f"    Mean: {productive_csi.mean():.4f}")
-    print(f"    Std:  {productive_csi.std():.4f}")
+        productive_csi = df.loc[productive_mask, 'csi_target']
+        print(f"  CSI stats (productive hours):")
+        print(f"    Mean: {productive_csi.mean():.4f}")
+        print(f"    Std:  {productive_csi.std():.4f}")
 
-    # Normalized PV clear sky
-    df['pv_cs_normalized'] = df['pv_clear_sky'] / pv_cfg['nameplate_capacity_kw']
+        # Normalized PV clear sky
+        df['pv_cs_normalized'] = df['pv_clear_sky'] / pv_cfg['nameplate_capacity_kw']
+    else:
+        print("Skipping CSI/Clear-Sky (use_csi=false, physics=false)")
+        df['pv_clear_sky'] = 0.0
+        df['csi_target'] = 0.0
+        df['pv_cs_normalized'] = 0.0
+
 
     # 2. TIME FEATURES (Cyclical & Linear)
     fg = cfg['features']['groups']
@@ -240,9 +250,9 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     weather_cols = [ghi_col, dhi_col, temp_col, rh_col, wind_col, act_target]
     # Add any other numeric columns from data config that might exist
     if 'wind_dir_col' in cols and cols['wind_dir_col'] in df.columns: weather_cols.append(cols['wind_dir_col'])
-    # Detect precipitation or other columns if they were mapped in config
+    # Detect precipitation, cloud, or Open-Meteo supplementary columns
     for c in df.columns:
-        if any(x in c.lower() for x in ['precip', 'rain', 'press', 'cloud']):
+        if any(x in c.lower() for x in ['precip', 'rain', 'press', 'cloud', 'om_ghi', 'om_dni', 'om_dhi', 'om_temp', 'om_humid', 'om_wind']):
             if c not in weather_cols: weather_cols.append(c)
 
     # Filter to existing columns only
@@ -295,10 +305,15 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
     corr_threshold = cfg['features']['corr_threshold']
     multicol_threshold = cfg['features']['multicol_threshold']
 
-    exclude_cols = [time_col, 'pv_clear_sky',
-                    'pv_cs_normalized', 'timestamp_col']
+    # Exclude auxiliary/intermediate computation columns (not real features)
+    # NOTE: pv_output_kw and csi_target at PAST timesteps in the lookback window 
+    # are legitimate autoregressive features, NOT data leakage.
+    # Data leakage would be if we used FUTURE values, which sequence creation prevents.
+    exclude_cols = [time_col, 'pv_clear_sky', 'pv_cs_normalized', 
+                    'pv_output_dc_kw', 'timestamp_col']
     candidate_cols = [c for c in df.select_dtypes(include=[np.number]).columns
                       if c not in exclude_cols]
+
     
     # Filter by Group
     grps = cfg['features'].get('groups', {})
@@ -306,14 +321,25 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
     for c in candidate_cols:
         is_lag = 'lag_' in c
         is_ma = '_ma_' in c or '_std_' in c
-        is_time = any(x in c for x in ['hour_', 'month_', 'day_of_year_'])
+        
+        # Identify specific time features
+        is_hour = 'hour_' in c
+        is_month = 'month_' in c
+        is_doy = 'day_of_year_' in c
+        is_year = 'year_linear' in c
         
         if is_lag:
             if grps.get('lags', True): filtered_candidates.append(c)
         elif is_ma:
             if grps.get('rolling', True): filtered_candidates.append(c)
-        elif is_time:
-            if grps.get('time', True): filtered_candidates.append(c)
+        elif is_hour:
+            if grps.get('time_hour', True) or grps.get('time', True): filtered_candidates.append(c)
+        elif is_month:
+            if grps.get('time_month', True) or grps.get('time', True): filtered_candidates.append(c)
+        elif is_doy:
+            if grps.get('time_doy', True) or grps.get('time', True): filtered_candidates.append(c)
+        elif is_year:
+            if grps.get('time_year', False) or grps.get('time', True): filtered_candidates.append(c)
         else:
             # Likely raw weather or other base features
             if grps.get('weather', True): filtered_candidates.append(c)
@@ -450,15 +476,24 @@ def run_preprocessing(cfg: dict):
     print(f"\nSelecting features based on: {act_target}")
     selected_features, corr_matrix = select_features_hybrid(df_train_feats, act_target, cfg)
 
-    # 7. Scaling
+    # 7. Scaling (Separate scalers for X features and y target)
     scaler_type = cfg['features'].get('scaler_type', 'minmax').lower()
+    target_scaler_type = cfg['features'].get('target_scaler_type', scaler_type).lower()
+    
+    # X scaler
     if scaler_type == 'standard':
-        print("Using StandardScaler (Mean=0, Std=1)...")
+        print("Using StandardScaler for X features (Mean=0, Std=1)...")
         X_scaler = StandardScaler()
+    else:
+        print("Using MinMaxScaler for X features (Range=[0, 1])...")
+        X_scaler = MinMaxScaler()
+    
+    # Y scaler (can differ from X scaler for better target distribution handling)
+    if target_scaler_type == 'standard':
+        print("Using StandardScaler for Target (Mean=0, Std=1)...")
         y_scaler = StandardScaler()
     else:
-        print("Using MinMaxScaler (Range=[0, 1])...")
-        X_scaler = MinMaxScaler()
+        print("Using MinMaxScaler for Target (Range=[0, 1])...")
         y_scaler = MinMaxScaler()
 
     X_train_scaled = X_scaler.fit_transform(df_train_feats[selected_features])
@@ -466,6 +501,7 @@ def run_preprocessing(cfg: dict):
 
     X_test_scaled = X_scaler.transform(df_test_feats[selected_features])
     y_test_scaled = y_scaler.transform(df_test_feats[[act_target]]).flatten()
+
 
     # 8. Create sequences
     print("\nCreating sequences...")
@@ -477,11 +513,13 @@ def run_preprocessing(cfg: dict):
     print(f"\nFinal Dataset Shapes:")
     # 9. Save artifacts
     # FIXED: Ensure we don't nest versions if the current processed_dir is already a version folder
+    # FIXED: Recursively find root to avoid nesting sub-versions inside versions
     raw_root = cfg['paths']['processed_dir']
-    if "version_" in os.path.basename(raw_root) or os.path.basename(raw_root).startswith("v_"):
-        root_out_dir = os.path.dirname(raw_root)
-    else:
-        root_out_dir = raw_root
+    root_out_dir = raw_root
+    while os.path.basename(root_out_dir).startswith(('version_', 'v_')) or "version_" in os.path.basename(root_out_dir):
+        parent = os.path.dirname(root_out_dir)
+        if not parent or parent == root_out_dir: break
+        root_out_dir = parent
 
     # Create shortened versioned directory to avoid path-too-long issues
     timestamp_str = datetime.now().strftime('%m%d_%H%M') # Shorter timestamp

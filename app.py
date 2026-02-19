@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import time
+import copy
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -365,7 +366,15 @@ if 'selected_model' not in st.session_state:
     st.session_state.selected_model = load_selected_model()
 
 cfg = st.session_state.cfg
-proc_dir = cfg['paths']['processed_dir']
+# FIXED: Recursively find root to avoid nesting sub-versions inside versions
+raw_root = cfg['paths']['processed_dir']
+root_out_dir = raw_root
+while os.path.basename(root_out_dir).startswith(('version_', 'v_')) or "version_" in os.path.basename(root_out_dir):
+    parent = os.path.dirname(root_out_dir)
+    if not parent or parent == root_out_dir: break
+    root_out_dir = parent
+proc_dir = root_out_dir
+
 model_dir = cfg['paths']['models_dir']
 target_dir = cfg['paths']['target_data_dir']
 
@@ -464,6 +473,13 @@ with st.sidebar:
         st.success("Master Config tersimpan!")
         st.cache_data.clear()
 
+    st.markdown("---")
+    st.markdown("##### 🎯 Tuning Controller")
+    cfg['tuning']['enabled'] = st.toggle("Enable Optuna Tuning", cfg['tuning'].get('enabled', False))
+    if cfg['tuning']['enabled']:
+        cfg['tuning']['n_trials'] = st.number_input("Number of Trials", 5, 200, cfg['tuning'].get('n_trials', 50), 5)
+        cfg['tscv']['enabled'] = st.toggle("Use TSCV in Tuning", cfg['tscv'].get('enabled', True))
+
 
 # ============================================================
 # MAIN AREA - HEADER
@@ -525,7 +541,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ============================================================
 # TABS
 # ============================================================
-tab_lab, tab_prep, tab_data, tab_tuning, tab2, tab3, tab4, tab1, tab5 = st.tabs([
+tab_lab, tab_prep, tab_data, tab_tuning, tab2, tab3, tab4, tab1, tab_compare, tab5 = st.tabs([
     "🧪 Feature Lab",
     "📥 Preprocessing",
     "🔎 Data Insights",
@@ -534,6 +550,7 @@ tab_lab, tab_prep, tab_data, tab_tuning, tab2, tab3, tab4, tab1, tab5 = st.tabs(
     "📈 Evaluation",
     "📦 Target Test",
     "🚀 Runner",
+    "🏆 Comparison",
     "📋 Logs",
 ])
 
@@ -668,6 +685,87 @@ with tab_prep:
             cfg['features']['groups'] = g
             
             st.markdown("---")
+            st.markdown("##### 🎛️ Feature Selection Mode")
+            sel_mode = st.radio(
+                "Mode Seleksi Fitur",
+                ["auto", "manual"],
+                index=0 if cfg['features'].get('selection_mode', 'auto') == 'auto' else 1,
+                horizontal=True,
+                help="**Auto**: Seleksi otomatis berbasis korelasi. **Manual**: Pilih fitur sendiri.",
+                key="p_sel_mode"
+            )
+            cfg['features']['selection_mode'] = sel_mode
+            
+            if sel_mode == 'manual':
+                st.caption("⚠️ Pilih fitur input secara manual. Fitur auxiliar (pv_clear_sky, pv_output_dc_kw) otomatis diblokir.")
+                try:
+                    # Try to load ACTUAL feature names from last preprocessing run
+                    feats_pkl_path = os.path.join(proc_dir, 'df_train_feats.pkl')
+                    blocked_cols = {'pv_clear_sky', 'pv_cs_normalized', 'pv_output_dc_kw', 
+                                   cfg['data']['time_col'], 'timestamp_col'}
+                    
+                    if os.path.exists(feats_pkl_path):
+                        df_feats_sample = pd.read_pickle(feats_pkl_path)
+                        all_available = sorted([c for c in df_feats_sample.columns 
+                                              if c not in blocked_cols])
+                        st.info(f"📋 Memuat {len(all_available)} fitur dari preprocessing terakhir")
+                    else:
+                        # Fallback: read CSV + estimate derived names
+                        csv_path = cfg['data']['csv_path']
+                        df_cols_preview = pd.read_csv(csv_path, sep=cfg['data']['csv_separator'], nrows=1)
+                        raw_cols = [c for c in df_cols_preview.columns if c not in blocked_cols]
+                        derived = ['hour_sin', 'hour_cos', 'month_sin', 'month_cos',
+                                  'day_of_year_sin', 'day_of_year_cos', 'year_linear',
+                                  'csi_target', 'pv_output_kw']
+                        for wc in raw_cols:
+                            prefix = wc.split('_')[0]
+                            for lag in ['1h', '12h', '24h', '48h', '168h']:
+                                derived.append(f"{prefix}_lag_{lag}")
+                            derived.extend([f"{prefix}_ma_3h", f"{prefix}_std_3h"])
+                        all_available = sorted(set(raw_cols + derived))
+                        st.warning("⚠️ Belum ada data preprocessing. Nama fitur adalah estimasi. "
+                                  "Jalankan Preprocessing (mode Auto) dulu untuk mendapatkan daftar fitur yang akurat.")
+                    
+                    # Group features by category for easier browsing
+                    cat_raw = [c for c in all_available if 'lag_' not in c and '_ma_' not in c 
+                              and '_std_' not in c and '_sin' not in c and '_cos' not in c 
+                              and 'year_' not in c and 'csi' not in c and 'pv_clear' not in c]
+                    cat_lag = [c for c in all_available if 'lag_' in c]
+                    cat_roll = [c for c in all_available if '_ma_' in c or '_std_' in c]
+                    cat_time = [c for c in all_available if '_sin' in c or '_cos' in c or 'year_' in c]
+                    cat_physics = [c for c in all_available if 'csi' in c.lower()]
+                    
+                    st.caption(f"**Tersedia:** {len(cat_raw)} Raw, {len(cat_lag)} Lag, "
+                              f"{len(cat_roll)} Rolling, {len(cat_time)} Time, {len(cat_physics)} Physics")
+                    
+                    current_manual = cfg['features'].get('manual_features', [])
+                    valid_defaults = [f for f in current_manual if f in all_available]
+                    
+                    selected_manual = st.multiselect(
+                        "Pilih Fitur Input:",
+                        options=all_available,
+                        default=valid_defaults,
+                        help="Pilih fitur yang ingin dijadikan input model. "
+                             "Tip: Jalankan preprocessing Auto dulu untuk melihat semua fitur terekayasa yang tersedia.",
+                        key="p_manual_feats"
+                    )
+                    cfg['features']['manual_features'] = selected_manual
+                    
+                    if selected_manual:
+                        st.success(f"✅ {len(selected_manual)} fitur dipilih.")
+                    else:
+                        st.warning("⚠️ Belum ada fitur yang dipilih! Pilih minimal 1 fitur.")
+                except Exception as e:
+                    st.error(f"Gagal membaca fitur: {e}")
+
+            else:
+                st.caption("Fitur akan dipilih otomatis berdasarkan korelasi dengan target.")
+                corr_th = st.slider("Correlation Threshold", 0.01, 0.5, 
+                                   cfg['features'].get('corr_threshold', 0.1), 0.01,
+                                   help="Fitur dengan korelasi < threshold akan dibuang.",
+                                   key="p_corr_th")
+                cfg['features']['corr_threshold'] = corr_th
+
             st.markdown("##### 📐 Data Split & Scaling")
             c_s1, c_s2 = st.columns(2)
             with c_s1:
@@ -888,11 +986,14 @@ with tab1:
                     
                     with contextlib.redirect_stdout(stdout_capture):
                         results = evaluate_model(model, cfg, data=data, scaler_dir=scaler_dir)
+                    # Add model_id to results metadata
+                    results['model_id'] = model_id
+                    
                     st.session_state.eval_results = results
                     save_eval_results_to_disk(results)
                     st.session_state.pipeline_log.append(
                         f"[{datetime.now():%H:%M:%S}] Evaluasi selesai. "
-                        f"Test R²: {results['metrics_test']['r2']:.4f}"
+                        f"Model: {model_id} | Test R²: {results['metrics_test']['r2']:.4f}"
                     )
                     st.success("Evaluasi selesai!")
                     with st.expander("📜 Output Detail"):
@@ -1141,6 +1242,7 @@ with tab2:
     
     # --- DATA VERSION SELECTOR ---
     with st.expander("📦 Pilih Versi Data Preprocessed", expanded=not has_data):
+        # Always use the root processed directory for listing
         if os.path.exists(proc_dir):
             versions = [f for f in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, f)) and (f.startswith('version_') or f.startswith('v_'))]
             versions = sorted(versions, reverse=True)
@@ -1160,7 +1262,14 @@ with tab2:
             
             cfg['paths']['processed_dir'] = active_proc_dir
             st.session_state.active_proc_dir = active_proc_dir
-            st.caption(f"Folder Aktif: `{os.path.basename(active_proc_dir)}`")
+            
+            # Check if this version is actually valid (has npy files)
+            is_valid = os.path.exists(os.path.join(active_proc_dir, 'X_train.npy'))
+            if is_valid:
+                st.caption(f"Folder Aktif: `{os.path.basename(active_proc_dir)}` ✅")
+            else:
+                st.error(f"⚠️ Folder `{os.path.basename(active_proc_dir)}` tidak berisi data mapping (X_train.npy tidak ditemukan).")
+                st.info("Pilih 'Latest (Default)' atau jalankan ulang Preprocessing.")
         else:
             st.warning("Folder processed belum ada. Silakan jalankan Preprocessing terlebih dahulu.")
 
@@ -1216,33 +1325,51 @@ with tab2:
     with st.expander("🛠️ Model Architecture & Hyperparameters", expanded=True):
         col_hp1, col_hp2 = st.columns(2)
         hp = cfg['model']['hyperparameters']
+        arch = cfg['model'].get('architecture', 'patchtst').lower()
         
         with col_hp1:
             st.markdown("**Core Structure**")
-            new_arch = st.selectbox("Arsitektur Model", ["patchtst", "gru", "lstm", "mlp"], 
-                                    index=["patchtst", "gru", "lstm", "mlp"].index(cfg['model'].get('architecture', 'patchtst').lower()))
+            new_arch = st.selectbox("Arsitektur Model", ["patchtst", "gru", "lstm", "rnn"], 
+                                    index=["patchtst", "gru", "lstm", "rnn"].index(arch))
             cfg['model']['architecture'] = new_arch
             
             hp['lookback'] = st.select_slider("Lookback Window (h)", 
                                               options=[24, 48, 72, 96, 120, 144, 168, 192, 240, 336],
-                                              value=hp['lookback'])
-            hp['d_model'] = st.selectbox("d_model (Hidden Dim)", [32, 64, 128, 256], 
-                                          index=[32,64,128,256].index(hp['d_model']))
-            hp['n_layers'] = st.number_input("n_layers", value=hp['n_layers'], min_value=1, max_value=12)
+                                              value=hp.get('lookback', 72))
+            
+            # Adaptive Labels for Core Structure
+            d_label = "d_model (Embedding Dimension)" if new_arch == "patchtst" else "Hidden Units (RNN Dimension)"
+            l_label = "Transformer Blocks" if new_arch == "patchtst" else "Stacked RNN Layers"
+            
+            _d_model_opts = sorted(set([16, 32, 64, 128, 256, 512] + [hp.get('d_model', 128)]))
+            hp['d_model'] = st.selectbox(d_label, _d_model_opts, 
+                                          index=_d_model_opts.index(hp.get('d_model', 128)))
+            hp['n_layers'] = st.number_input(l_label, value=hp.get('n_layers', 3), min_value=1, max_value=12)
             
         with col_hp2:
             st.markdown("**Optimization**")
-            hp['learning_rate'] = st.number_input("Learning Rate", value=hp['learning_rate'],
+            hp['learning_rate'] = st.number_input("Learning Rate", value=hp.get('learning_rate', 0.0001),
                                                    format="%.6f", step=0.0001)
-            hp['batch_size'] = st.selectbox("Batch Size", [16, 32, 64, 128],
-                                             index=[16,32,64,128].index(hp['batch_size']))
-            hp['dropout'] = st.slider("Dropout Rate", 0.0, 0.5, hp['dropout'], 0.05)
+            _bs_opts = sorted(set([16, 32, 64, 128] + [hp.get('batch_size', 32)]))
+            hp['batch_size'] = st.selectbox("Batch Size", _bs_opts,
+                                             index=_bs_opts.index(hp.get('batch_size', 32)))
+            hp['dropout'] = st.number_input("Dropout Rate", value=hp.get('dropout', 0.2), 
+                                             min_value=0.0, max_value=0.9, step=0.01, format="%.2f")
             
-            # Adv. Params expander inside center
-            with st.expander("Advanced Params (Patch/Stride)"):
-                hp['patch_len'] = st.number_input("patch_len", value=hp['patch_len'], min_value=4, step=4)
-                hp['stride'] = st.number_input("stride", value=hp['stride'], min_value=4, step=4)
-                hp['n_heads'] = st.selectbox("n_heads", [4, 8, 12], index=[4,8,12].index(hp['n_heads']))
+            # --- ARCHITECTURE SPECIFIC PARAMS ---
+            if new_arch == "patchtst":
+                with st.expander("🧩 PatchTST Specific Params", expanded=True):
+                    hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
+                    hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
+                    hp['ff_dim'] = st.number_input("ff_dim (F)", value=hp.get('ff_dim', hp['d_model'] * 2), min_value=32, step=32)
+                    _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 16)]))
+                    hp['n_heads'] = st.selectbox("n_heads (H)", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 16)))
+            
+            elif new_arch in ["gru", "lstm", "rnn"]:
+                with st.expander(f"🔄 {new_arch.upper()} Specific Params", expanded=True):
+                    st.info(f"Input 'Hidden Units' di atas menentukan kapasitas memori per {new_arch.upper()} cell.")
+                    hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=hp.get('use_bidirectional', True), key=f"bi_{new_arch}")
+                    st.caption(f"Arsitektur {new_arch.upper()} saat ini menggunakan bidirectional stack untuk menangkap konteks temporal.")
 
     # 2. Training Control Center
     col_ctrl1, col_ctrl2 = st.columns([2, 1])
@@ -1332,9 +1459,16 @@ with tab2:
                 
                 # Success & Persist
                 st.session_state.training_history = history.history
+                st.session_state['last_training_time'] = meta.get('training_time_seconds', 0)
                 save_training_history(history.history, meta['model_id'])
-                st.success(f"Training Selesai! Model saved as: {meta['model_id']}")
-                time.sleep(1); st.rerun()
+                
+                # CRITICAL: Auto-select the newly trained model for evaluation
+                st.session_state.selected_model = meta['model_id']
+                
+                duration_str = f"{meta['training_time_seconds']:.2f}s" if meta['training_time_seconds'] < 60 else f"{meta['training_time_seconds']/60:.2f}m"
+                st.success(f"✅ Training Selesai! ({duration_str}) | Model saved: {meta['model_id']}")
+                time.sleep(2) 
+                st.rerun()
             except Exception as e:
                 st.error(f"Training Failed: {e}")
                 import traceback; st.code(traceback.format_exc())
@@ -1354,6 +1488,12 @@ with tab2:
         with c2:
             st.metric("Best Val Loss", f"{min(hist['val_loss']):.6f}")
             st.metric("Total Epochs", len(hist['loss']))
+            
+            if 'last_training_time' in st.session_state:
+                t_sec = st.session_state['last_training_time']
+                t_str = f"{t_sec:.2f}s" if t_sec < 60 else f"{t_sec/60:.2f}m"
+                st.metric("Time Elapsed", t_str)
+            
             if st.button("🗑️ Clear History View"):
                 st.session_state.training_history = None
                 st.rerun()
@@ -1414,6 +1554,108 @@ with tab_tuning:
         </div>
         """, unsafe_allow_html=True)
 
+    # --- NEW: SEARCH SPACE EDITOR & EXECUTION (Always Visible) ---
+    if cfg['tuning']['enabled']:
+        st.markdown("#### 🚀 Konfigurasi & Jalankan Tuning")
+        
+        # Add model selector specifically for tuning context
+        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "gru", "lstm", "rnn"], 
+                              index=["patchtst", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
+                              key="tune_arch_selector")
+        cfg['model']['architecture'] = t_arch # Sync with config
+        
+        with st.expander("🛠️ Edit Search Space Hyperparameters", expanded=False):
+            st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
+            
+            space = cfg['tuning']['search_space']
+            col_s1, col_s2, col_s3 = st.columns(3)
+            
+            with col_s1:
+                if t_arch == "patchtst":
+                    st.markdown("**1. Patching & Stride**")
+                    p_vals = space.get('patch_len', [8, 24, 4])
+                    p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
+                    p_max = st.number_input("Patch Max", p_min, 128, p_vals[1], 2, key="p_max_new")
+                    p_step = st.number_input("Patch Step", 1, 16, p_vals[2], 1, key="p_step_new")
+                    space['patch_len'] = [p_min, p_max, p_step]
+                    
+                    s_vals = space.get('stride', [4, 12, 2])
+                    s_min = st.number_input("Stride Min", 1, 32, s_vals[0], 1, key="s_min_new")
+                    s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key="s_max_new")
+                    s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key="s_step_new")
+                    space['stride'] = [s_min, s_max, s_step]
+                else:
+                    st.markdown("**1. RNN Configuration**")
+                    st.info("Parameter patching tidak tersedia untuk arsitektur GRU.")
+                    # Ensure they aren't in space to avoid confusion (optional)
+
+            with col_s2:
+                # Dynamic Search Space Labels
+                ss_d_label = "D_Model (Embedding)" if cfg['model']['architecture'] == 'patchtst' else "Hidden Units (Capacity)"
+                ss_l_label = "Layers (Transformer)" if cfg['model']['architecture'] == 'patchtst' else "Layers (Stacked RNN)"
+                
+                st.markdown(f"**2. {cfg['model']['architecture'].upper()} Capacity**")
+                d_vals = space.get('d_model', [64, 256])
+                d_min = st.number_input(f"{ss_d_label} Min", 4, 512, d_vals[0], 4, key="d_min_new")
+                d_max = st.number_input(f"{ss_d_label} Max", d_min, 1024, d_vals[1], 4, key="d_max_new")
+                space['d_model'] = [d_min, d_max]
+                
+                l_vals = space.get('n_layers', [2, 5])
+                l_min = st.number_input(f"{ss_l_label} Min", 1, 12, l_vals[0], 1, key="l_min_new")
+                l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key="l_max_new")
+                space['n_layers'] = [l_min, l_max]
+                
+                if t_arch == "patchtst":
+                    ff_vals = space.get('ff_dim', [128, 512])
+                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
+                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
+                    space['ff_dim'] = [ff_min, ff_max]
+                    
+                    h_vals = space.get('n_heads', [4, 16])
+                    h_min = st.number_input("Heads Min", 1, 32, h_vals[0], 1, key="h_min_new")
+                    h_max = st.number_input("Heads Max", h_min, 64, h_vals[1], 1, key="h_max_new")
+                    space['n_heads'] = [h_min, h_max]
+
+                dr_vals = space.get('dropout', [0.05, 0.3])
+                dr_min = st.number_input("Dropout Min", 0.0, 0.5, dr_vals[0], 0.05, key="dr_min_new")
+                dr_max = st.number_input("Dropout Max", dr_min, 0.7, dr_vals[1], 0.05, key="dr_max_new")
+                space['dropout'] = [dr_min, dr_max]
+
+            with col_s3:
+                st.markdown("**3. Time & Speed**")
+                loc_vals = space.get('lookback', [48, 336, 24])
+                loc_min = st.number_input("Lookback Min", 24, 720, loc_vals[0], 24, key="loc_min_new")
+                loc_max = st.number_input("Lookback Max", loc_min, 1440, loc_vals[1], 24, key="loc_max_new")
+                loc_step = st.number_input("Lookback Step", 12, 168, loc_vals[2], 12, key="loc_step_new")
+                space['lookback'] = [loc_min, loc_max, loc_step]
+                
+                lr_vals = space.get('learning_rate', [5e-5, 1e-3])
+                lr_min = st.number_input("LR Min", 1e-6, 1e-1, lr_vals[0], format="%.6f", key="lr_min_new")
+                lr_max = st.number_input("LR Max", lr_min, 1e-1, lr_vals[1], format="%.6f", key="lr_max_new")
+                space['learning_rate'] = [lr_min, lr_max]
+
+                b_vals = space.get('batch_size', [16, 64])
+                b_min = st.number_input("Batch Min", 2, 256, b_vals[0], 2, key="b_min_new")
+                b_max = st.number_input("Batch Max", b_min, 512, b_vals[1], 2, key="b_max_new")
+                space['batch_size'] = [b_min, b_max]
+
+            if st.button("💾 Save Search Space to Master Config", use_container_width=True, key="save_ss_tuning"):
+                cfg['tuning']['search_space'] = space
+                save_config_to_file(cfg)
+                st.success("Search space berhasil disimpan ke config.yaml!")
+
+        # Device Selector for Tuning
+        tune_col_dev1, tune_col_dev2 = st.columns([1, 2])
+        with tune_col_dev1:
+            tune_device = st.radio("🖥️ Device untuk Tuning", ["CPU", "GPU"], index=0, 
+                                   horizontal=True, key="tune_device_top",
+                                   help="CPU direkomendasikan untuk menghindari OOM error pada GPU dengan VRAM terbatas.")
+        with tune_col_dev2:
+            run_tune = st.button("🔥 Jalankan Optuna Tuning Baru", type="primary", use_container_width=True, 
+                                  disabled=not has_data, key="btn_tune_execute")
+    else:
+        st.warning("⚠️ **Optuna Tuning Belum Aktif**. Aktifkan melalui toggle 'Enable Optuna Tuning' pada sidebar di sebelah kiri.")
+
     st.markdown("---")
     
     if st.session_state.tuning_results:
@@ -1422,7 +1664,7 @@ with tab_tuning:
         best = tr['best_params']
         
         # Best Parameters
-        st.markdown("#### Best Hyperparameters")
+        st.markdown("#### Best Hyperparameters (Last Run)")
         cols = st.columns(len(best))
         for col, (k, v) in zip(cols, best.items()):
             with col:
@@ -1512,20 +1754,83 @@ with tab_tuning:
             st.write(f"**Trials:** {cfg['tuning']['n_trials']}")
         with cols[2]:
             st.write(f"**Data Status:** {'✅ Ready' if has_data else '❌ Missing'}")
-            
-        run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", width='stretch', 
-                              disabled=not has_data, key="btn_tune_tab")
+        
+        tune_col_d1, tune_col_d2 = st.columns([1, 2])
+        with tune_col_d1:
+            tune_device = st.radio("🖥️ Device", ["CPU", "GPU"], index=0, 
+                                   horizontal=True, key="tune_device_bottom",
+                                   help="CPU direkomendasikan untuk stabilitas.")
+        with tune_col_d2:
+            run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", use_container_width=True, 
+                                  disabled=not has_data, key="btn_tune_tab")
         st.markdown('</div>', unsafe_allow_html=True)
 
         if cfg['tuning']['enabled']:
-            st.markdown("#### Search Space Aktif (Hyperparameters)")
+            st.markdown("#### 🛠️ Edit Search Space")
+            st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
+            
             space = cfg['tuning']['search_space']
+            
+            # Create a nice editor for the search space
+            with st.expander("Configure Search Space Details", expanded=True):
+                col_s1, col_s2, col_s3 = st.columns(3)
+                
+                # Patching Params
+                with col_s1:
+                    st.markdown("**1. Patching & Stride**")
+                    p_vals = space.get('patch_len', [8, 24, 4])
+                    p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min")
+                    p_max = st.number_input("Patch Max", p_min, 128, p_vals[1], 2, key="p_max")
+                    p_step = st.number_input("Patch Step", 1, 16, p_vals[2], 1, key="p_step")
+                    space['patch_len'] = [p_min, p_max, p_step]
+                    
+                    s_vals = space.get('stride', [4, 12, 2])
+                    s_min = st.number_input("Stride Min", 1, 32, s_vals[0], 1, key="s_min")
+                    s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key="s_max")
+                    s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key="s_step")
+                    space['stride'] = [s_min, s_max, s_step]
+
+                # Architecture Params
+                with col_s2:
+                    st.markdown("**2. Model Capacity**")
+                    d_vals = space.get('d_model', [64, 256])
+                    d_min = st.number_input("D_Model Min", 32, 512, d_vals[0], 32, key="d_min")
+                    d_max = st.number_input("D_Model Max", d_min, 1024, d_vals[1], 32, key="d_max")
+                    space['d_model'] = [d_min, d_max]
+                    
+                    l_vals = space.get('n_layers', [3, 8])
+                    l_min = st.number_input("Layers Min", 1, 12, l_vals[0], 1, key="l_min")
+                    l_max = st.number_input("Layers Max", l_min, 20, l_vals[1], 1, key="l_max")
+                    space['n_layers'] = [l_min, l_max]
+
+                # Training Params
+                with col_s3:
+                    st.markdown("**3. Time & Speed**")
+                    loc_vals = space.get('lookback', [48, 336, 24])
+                    loc_min = st.number_input("Lookback Min", 24, 720, loc_vals[0], 24, key="loc_min")
+                    loc_max = st.number_input("Lookback Max", loc_min, 1440, loc_vals[1], 24, key="loc_max")
+                    loc_step = st.number_input("Lookback Step", 12, 168, loc_vals[2], 12, key="loc_step")
+                    space['lookback'] = [loc_min, loc_max, loc_step]
+                    
+                    lr_vals = space.get('learning_rate', [5e-5, 1e-3])
+                    lr_min = st.number_input("LR Min", 1e-6, 1e-1, lr_vals[0], format="%.6f", key="lr_min")
+                    lr_max = st.number_input("LR Max", lr_min, 1e-1, lr_vals[1], format="%.6f", key="lr_max")
+                    space['learning_rate'] = [lr_min, lr_max]
+
+            # Show active summary table
+            st.markdown("#### Search Space Aktif (Hyperparameters)")
             space_df = pd.DataFrame([
                 {'Parameter': k, 'Range': str(v)} for k, v in space.items()
             ])
             st.dataframe(space_df, width='stretch', hide_index=True)
+            
+            if st.button("💾 Save Search Space to Master Config", use_container_width=True):
+                cfg['tuning']['search_space'] = space
+                save_config_to_file(cfg)
+                st.success("Search space berhasil disimpan ke config.yaml!")
         else:
-            st.warning("Optuna Tuning belum diaktifkan di sidebar.")
+            st.warning("⚠️ **Optuna Tuning Belum Aktif**. Aktifkan melalui toggle 'Enable Optuna Tuning' pada sidebar di sebelah kiri.")
+            st.info("Tuning memungkinkan sistem mencari arsitektur terbaik secara otomatis untuk mencapai R² yang lebih tinggi.")
 
     # --- EXECUTION LOGIC FOR TUNING ---
     if 'run_tune' in locals() and run_tune:
@@ -1583,9 +1888,12 @@ with tab_tuning:
 
             live_monitor = TuningLiveMonitor(cfg['tuning']['n_trials'])
             
+            # Determine CPU mode from device selector
+            use_cpu = tune_device == "CPU" if 'tune_device' in dir() else True
+            
             with contextlib.redirect_stdout(stdout_capture):
                 from src.trainer import run_optuna_tuning
-                best, study = run_optuna_tuning(cfg, extra_callbacks=[live_monitor])
+                best, study = run_optuna_tuning(cfg, extra_callbacks=[live_monitor], force_cpu=use_cpu)
             
             # Save results for the Tuning Monitor tab
             trial_data = []
@@ -1628,13 +1936,100 @@ with tab3:
             all_models = [f for f in os.listdir(model_dir) if f.endswith(('.keras', '.h5')) or os.path.isdir(os.path.join(model_dir, f))]
             if all_models:
                 current_sel = st.session_state.get('selected_model', all_models[0])
-                model_to_eval = st.selectbox("Pilih Model:", all_models, 
-                                           index=all_models.index(current_sel) if current_sel in all_models else 0)
+                model_to_eval = st.selectbox("Pilih Model untuk Evaluasi (Tab):", all_models, 
+                                           index=all_models.index(current_sel) if current_sel in all_models else 0,
+                                           key="sel_eval_tab")
                 st.session_state.selected_model = model_to_eval
                 
-                if st.button("🔎 Run Evaluation for Selected Model", type="primary", use_container_width=True):
-                    # Logic to run evaluation (roughly same as Runner/tab1)
-                    st.rerun() # Just rerun to trigger the logic if integrated or call it directly
+                # Model Info Preview
+                model_info_path = os.path.join(model_dir, model_to_eval, "meta.json")
+                if os.path.exists(model_info_path):
+                    with open(model_info_path, 'r') as f:
+                        m_meta = json.load(f)
+                    st.markdown(f"""
+                    <div style="background-color: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-bottom: 15px;">
+                        <b>Arch:</b> {m_meta.get('architecture', 'N/A').upper()} | 
+                        <b>Features:</b> {m_meta.get('n_features', 'N/A')} | 
+                        <b>Data Source:</b> <span style="color: #94a3b8;">{os.path.basename(m_meta.get('data_source', 'N/A'))}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                if st.button("🔎 Run Evaluation for Selected Model", type="primary", use_container_width=True, key="btn_eval_tab"):
+                    with st.spinner(f"Evaluating model: {model_to_eval}..."):
+                        try:
+                            import gc
+                            tf.keras.backend.clear_session()
+                            gc.collect()
+                            
+                            from src.model_factory import get_custom_objects, compile_model
+                            from src.predictor import evaluate_model
+                            
+                            model_path = os.path.join(model_dir, model_to_eval)
+                            model_root = model_dir
+                            
+                            if os.path.isdir(model_path):
+                                model_root = model_path
+                                for ext in ['model.keras', 'model.h5']:
+                                    if os.path.exists(os.path.join(model_path, ext)):
+                                        model_path = os.path.join(model_path, ext)
+                                        break
+                                        
+                            custom_objs = get_custom_objects()
+                            with tf.keras.utils.custom_object_scope(custom_objs):
+                                model = tf.keras.models.load_model(model_path, compile=False)
+                            
+                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                            scaler_dir = model_root if os.path.isdir(model_root) else None
+                            
+                            data = st.session_state.get('prep_metadata', None)
+                            results = evaluate_model(model, cfg, data=data, scaler_dir=scaler_dir)
+                            results['model_id'] = model_to_eval
+                            
+                            st.session_state.eval_results = results
+                            save_eval_results_to_disk(results)
+                            st.success(f"Evaluasi berhasil untuk {model_to_eval}!")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            err_msg = str(e)
+                            st.error(f"Gagal mengevaluasi model: {err_msg}")
+                            
+                            # SMART FIX: If it's a feature mismatch, offer to switch data version
+                            if "Mismatch Fitur" in err_msg or "Inkompatibilitas Fitur" in err_msg:
+                                model_info_path = os.path.join(model_dir, model_to_eval, "meta.json")
+                                if os.path.exists(model_info_path):
+                                    with open(model_info_path, 'r') as f:
+                                        m_meta = json.load(f)
+                                    orig_raw = m_meta.get('data_source', '')
+                                    orig_path = orig_raw.replace('\\', '/')
+                                    
+                                    found_path = None
+                                    if orig_path and os.path.exists(orig_path):
+                                        found_path = orig_path
+                                    elif orig_raw:
+                                        # Smart Recovery: Search for leaf folder
+                                        leaf_name = os.path.basename(orig_raw.rstrip('\\/'))
+                                        if leaf_name:
+                                            # Find proot
+                                            search_root = proc_dir # base data/processed
+                                            for root, dirs, files in os.walk(search_root):
+                                                if os.path.basename(root) == leaf_name:
+                                                    if 'X_train.npy' in files:
+                                                        found_path = root.replace('\\', '/')
+                                                        break
+                                    
+                                    if found_path:
+                                        st.info(f"💡 Model ini butuh fitur dari folder: `{os.path.basename(found_path)}`")
+                                        if st.button("🔄 Switch ke Data Asli Model Ini & Jalankan Ulang"):
+                                            st.session_state.cfg['paths']['processed_dir'] = found_path
+                                            save_config_to_file(st.session_state.cfg)
+                                            st.success("Jalur data diperbarui. Mengulangi evaluasi...")
+                                            time.sleep(1)
+                                            st.rerun()
+                                    else:
+                                        st.warning("⚠️ Data asli untuk model ini tidak ditemukan di `data/processed`. Silakan buat data dengan jumlah fitur yang sesuai di tab Preprocessing.")
+
+                            import traceback; st.code(traceback.format_exc())
             else:
                 st.warning("Belum ada model tersimpan di folder models/.")
         else:
@@ -1642,18 +2037,28 @@ with tab3:
 
     if st.session_state.eval_results:
         results = st.session_state.eval_results
+        
+        # Check for model consistency
+        disp_model = results.get('model_id', 'Unknown')
+        curr_model = st.session_state.get('selected_model', 'None')
+        
+        if disp_model != curr_model:
+            st.warning(f"⚠️ Hasil di bawah adalah milik model **{disp_model}**, sedangkan model yang terpilih saat ini adalah **{curr_model}**. Klik tombol evaluasi di atas untuk memperbarui.")
+        else:
+            st.info(f"✅ Menampilkan hasil evaluasi untuk model aktif: **{disp_model}**")
+
         m_train = results['metrics_train']
         m_test = results['metrics_test']
         
         # ====== ROW 1: Metric cards ======
-        st.markdown("#### Performance Metrics (Test Set)")
+        st.markdown(f"#### Performance Metrics (Test Set - {disp_model})")
         col1, col2, col3, col4 = st.columns(4)
         
         metrics_display = [
             ("MAE", m_test['mae'], " kW"),
             ("RMSE", m_test['rmse'], " kW"),
             ("R\u00b2", m_test['r2'], ""),
-            ("MAPE", m_test['mape'], "%"),
+            ("WMAPE", m_test.get('wmape', m_test['mape']), "%"),
         ]
         for col, (name, val, unit) in zip([col1, col2, col3, col4], metrics_display):
             with col:
@@ -1666,15 +2071,25 @@ with tab3:
         
         # ====== ROW 2: Train vs Test Comparison ======
         st.markdown("#### Train vs Test Comparison")
-        df_metrics = pd.DataFrame({
-            'Metrik': ['MAE (kW)', 'RMSE (kW)', 'R\u00b2', 'MAPE (%)', 'NormMAE (%)'],
-            'Train': [f"{m_train['mae']:.4f}", f"{m_train['rmse']:.4f}", 
-                      f"{m_train['r2']:.4f}", f"{m_train['mape']:.2f}",
-                      f"{m_train.get('norm_mae', 0)*100:.2f}"],
-            'Test': [f"{m_test['mae']:.4f}", f"{m_test['rmse']:.4f}",
-                     f"{m_test['r2']:.4f}", f"{m_test['mape']:.2f}",
-                     f"{m_test.get('norm_mae', 0)*100:.2f}"],
-        })
+        
+        # Get productive-hours metrics if available
+        m_train_prod = results.get('metrics_train_productive', {})
+        m_test_prod = results.get('metrics_test_productive', {})
+        
+        metrics_rows = [
+            ['MAE (kW)', f"{m_train['mae']:.4f}", f"{m_test['mae']:.4f}"],
+            ['RMSE (kW)', f"{m_train['rmse']:.4f}", f"{m_test['rmse']:.4f}"],
+            ['R\u00b2 (All Hours)', f"{m_train['r2']:.4f}", f"{m_test['r2']:.4f}"],
+            ['WMAPE (%)', f"{m_train.get('wmape', 0):.2f}", f"{m_test.get('wmape', 0):.2f}"],
+            ['MAPE (%, capped)', f"{m_train['mape']:.2f}", f"{m_test['mape']:.2f}"],
+            ['NormMAE (%)', f"{m_train.get('norm_mae', 0)*100:.2f}", f"{m_test.get('norm_mae', 0)*100:.2f}"],
+        ]
+        if m_test_prod:
+            metrics_rows.insert(3, ['R² (Productive)', 
+                                    f"{m_train_prod.get('r2', 0):.4f}", 
+                                    f"{m_test_prod.get('r2', 0):.4f}"])
+        
+        df_metrics = pd.DataFrame(metrics_rows, columns=['Metrik', 'Train', 'Test'])
         st.dataframe(df_metrics, width='stretch', hide_index=True)
         
         # ====== Prepare common data ======
@@ -1778,79 +2193,122 @@ with tab3:
         except Exception as e:
             st.caption(f"Time series plot tidak tersedia: {e}")
         
-        # ====== ROW 5: Error Analysis ======
-        st.markdown("#### Error Analysis")
-        col1, col2 = st.columns(2)
+        # ====== ROW 5: Per-Step Forecast Diagnostics ======
+        st.markdown("#### 📊 Diagnostik: R² per Forecast Step")
+        per_step_r2 = results.get('per_step_r2', {})
+        if per_step_r2:
+            steps_list = sorted(per_step_r2.keys())
+            r2_vals = [per_step_r2[s] for s in steps_list]
+            
+            fig_r2_step = go.Figure()
+            fig_r2_step.add_trace(go.Scatter(
+                x=steps_list, y=r2_vals,
+                mode='lines+markers',
+                line=dict(color='#818cf8', width=2.5),
+                marker=dict(size=7, color='#818cf8'),
+                name='R² per Step',
+                hovertemplate='Step t+%{x}: R²=%{y:.4f}<extra></extra>'
+            ))
+            # Add reference lines
+            fig_r2_step.add_hline(y=0.8, line_dash='dot', line_color='#6ee7b7', 
+                                  annotation_text='Target R²=0.80', annotation_position='top left')
+            fig_r2_step.add_hline(y=0, line_dash='dash', line_color='#ef4444', line_width=1)
+            fig_r2_step.update_layout(
+                title="R² Score per Forecast Step (ALL Hours)",
+                xaxis_title="Forecast Step (t+n hours)", yaxis_title="R² Score",
+                template="plotly_dark",
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                height=400,
+                yaxis=dict(range=[min(min(r2_vals) - 0.05, -0.1), 1.0]),
+            )
+            st.plotly_chart(fig_r2_step, width='stretch')
+        else:
+            st.info("Per-step R² diagnostik belum tersedia. Jalankan evaluasi ulang.")
         
-        with col1:
-            # Error by Hour of Day
-            try:
-                df_test = results['df_test']
-                test_indices = results['test_indices']
-                abs_error_per_seq = np.abs(results['pv_test_actual'][:, 0] - results['pv_test_pred'][:, 0])
-                hours_per_seq = df_test.index[test_indices].hour
-                
-                df_hourly = pd.DataFrame({
-                    'Hour': hours_per_seq[:len(abs_error_per_seq)],
-                    'MAE': abs_error_per_seq[:len(hours_per_seq)]
-                })
-                hourly_stats = df_hourly.groupby('Hour')['MAE'].agg(['mean', 'std']).reset_index()
-                
-                fig_hour = go.Figure()
-                fig_hour.add_trace(go.Bar(
-                    x=hourly_stats['Hour'], y=hourly_stats['mean'],
+        # ====== ROW 6: Per-Hour-of-Day Error Analysis ======
+        st.markdown("#### 🕐 Diagnostik: Error per Jam (Hour of Day)")
+        hourly_metrics = results.get('hourly_metrics', {})
+        if hourly_metrics:
+            col1, col2 = st.columns(2)
+            
+            hours = list(range(24))
+            h_mae = [hourly_metrics.get(h, {}).get('mae', 0) for h in hours]
+            h_rmse = [hourly_metrics.get(h, {}).get('rmse', 0) for h in hours]
+            h_r2 = [hourly_metrics.get(h, {}).get('r2', 0) for h in hours]
+            
+            with col1:
+                fig_hourly = go.Figure()
+                fig_hourly.add_trace(go.Bar(
+                    x=hours, y=h_mae,
                     marker_color='#818cf8', opacity=0.8,
-                    name='Mean |Error|',
-                    error_y=dict(type='data', array=hourly_stats['std'].fillna(0), visible=True,
-                                 color='#f472b6')
+                    name='MAE (kW)',
+                    hovertemplate='Hour %{x}: MAE=%{y:.3f} kW<extra></extra>'
                 ))
-                fig_hour.update_layout(
-                    title="MAE by Hour of Day (h+1)",
-                    xaxis_title="Hour", yaxis_title="MAE (kW)",
+                fig_hourly.add_trace(go.Bar(
+                    x=hours, y=h_rmse,
+                    marker_color='#f472b6', opacity=0.6,
+                    name='RMSE (kW)',
+                    hovertemplate='Hour %{x}: RMSE=%{y:.3f} kW<extra></extra>'
+                ))
+                fig_hourly.update_layout(
+                    title="MAE & RMSE per Hour of Day (All 24h Steps)",
+                    xaxis_title="Hour of Day", yaxis_title="Error (kW)",
+                    template="plotly_dark",
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                    height=400, barmode='group',
+                    xaxis=dict(dtick=1),
+                )
+                st.plotly_chart(fig_hourly, width='stretch')
+            
+            with col2:
+                # Color-code R² bars: green if good, red if bad
+                colors = ['#6ee7b7' if r > 0.7 else '#fbbf24' if r > 0.3 else '#ef4444' for r in h_r2]
+                fig_r2h = go.Figure()
+                fig_r2h.add_trace(go.Bar(
+                    x=hours, y=h_r2,
+                    marker_color=colors, opacity=0.85,
+                    name='R² per Hour',
+                    hovertemplate='Hour %{x}: R²=%{y:.4f}<extra></extra>'
+                ))
+                fig_r2h.add_hline(y=0.8, line_dash='dot', line_color='#6ee7b7', 
+                                  annotation_text='Target', annotation_position='top left')
+                fig_r2h.update_layout(
+                    title="R² per Hour of Day",
+                    xaxis_title="Hour of Day", yaxis_title="R²",
                     template="plotly_dark",
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                     height=400,
                     xaxis=dict(dtick=1),
                 )
+                st.plotly_chart(fig_r2h, width='stretch')
+            
+            # Hourly metrics table
+            with st.expander("📋 Tabel Lengkap Per-Jam", expanded=False):
+                tbl_data = []
+                for h in range(24):
+                    m = hourly_metrics.get(h, {})
+                    tbl_data.append({
+                        'Jam': f"{h:02d}:00",
+                        'MAE (kW)': f"{m.get('mae', 0):.4f}",
+                        'RMSE (kW)': f"{m.get('rmse', 0):.4f}",
+                        'R²': f"{m.get('r2', 0):.4f}",
+                        'N Samples': m.get('count', 0),
+                    })
+                st.dataframe(pd.DataFrame(tbl_data), hide_index=True, width='stretch')
+        else:
+            # Fallback to old method
+            try:
+                df_test = results['df_test']
+                test_indices = results['test_indices']
+                abs_error_per_seq = np.abs(results['pv_test_actual'][:, 0] - results['pv_test_pred'][:, 0])
+                hours_per_seq = df_test.index[test_indices].hour
+                df_hourly = pd.DataFrame({'Hour': hours_per_seq[:len(abs_error_per_seq)], 'MAE': abs_error_per_seq[:len(hours_per_seq)]})
+                hourly_stats = df_hourly.groupby('Hour')['MAE'].agg(['mean', 'std']).reset_index()
+                fig_hour = go.Figure(go.Bar(x=hourly_stats['Hour'], y=hourly_stats['mean'], marker_color='#818cf8'))
+                fig_hour.update_layout(title="MAE by Hour (h+1)", xaxis_title="Hour", yaxis_title="MAE (kW)", template="plotly_dark", height=400)
                 st.plotly_chart(fig_hour, width='stretch')
             except Exception as e:
                 st.caption(f"Hourly error chart tidak tersedia: {e}")
-        
-        with col2:
-            # Error by Forecast Horizon Step
-            try:
-                horizon = results['pv_test_actual'].shape[1]
-                mae_per_step = []
-                for h in range(horizon):
-                    step_actual = results['pv_test_actual'][:, h]
-                    step_pred = results['pv_test_pred'][:, h]
-                    # Filter productive hours
-                    step_ghi = results['ghi_test'][:, h]
-                    mask_h = step_ghi > 50
-                    if mask_h.sum() > 0:
-                        mae_h = np.mean(np.abs(step_actual[mask_h] - step_pred[mask_h]))
-                    else:
-                        mae_h = 0
-                    mae_per_step.append(mae_h)
-                
-                fig_step = go.Figure()
-                fig_step.add_trace(go.Scatter(
-                    x=list(range(1, horizon + 1)), y=mae_per_step,
-                    mode='lines+markers',
-                    line=dict(color='#f472b6', width=2),
-                    marker=dict(size=6, color='#f472b6'),
-                    name='MAE'
-                ))
-                fig_step.update_layout(
-                    title="MAE by Forecast Step (Productive Hours)",
-                    xaxis_title="Forecast Step (h+n)", yaxis_title="MAE (kW)",
-                    template="plotly_dark",
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                    height=400,
-                )
-                st.plotly_chart(fig_step, width='stretch')
-            except Exception as e:
-                st.caption(f"Forecast step chart tidak tersedia: {e}")
         
         # ====== ROW 6: Actual vs Predicted Distribution ======
         st.markdown("#### Power Distribution")
@@ -1991,6 +2449,204 @@ with tab4:
                         st.code(stdout_capture.getvalue(), language="text")
                 except Exception as e:
                     st.error(f"Error: {e}")
+
+
+
+# --- TAB: MODEL COMPARISON ---
+with tab_compare:
+    st.markdown("### 🏆 Model Comparison & Leaderboard")
+    st.markdown("Bandingkan performa beberapa model secara berdampingan.")
+    
+    if os.path.exists(model_dir):
+        all_models = [f for f in os.listdir(model_dir) if f.endswith(('.keras', '.h5', '.json')) or os.path.isdir(os.path.join(model_dir, f))]
+        all_models = [f for f in all_models if not f.endswith('_meta.json')] # Filter meta files if any
+        
+        if all_models:
+            st.markdown("#### 1. Pilih Model")
+            selected_models = st.multiselect("Pilih model untuk dibandingkan:", all_models, default=all_models[:min(2, len(all_models))])
+            
+            if st.button("📊 Run Comparison Analysis", type="primary", use_container_width=True):
+                if not selected_models:
+                    st.warning("Pilih minimal satu model.")
+                else:
+                    comparison_results = []
+                    progress_bar = st.progress(0)
+                    
+                    for i, model_id in enumerate(selected_models):
+                        status_text = st.empty()
+                        status_text.text(f"Mengevaluasi {i+1}/{len(selected_models)}: {model_id}...")
+                        
+                        try:
+                            # 1. Clean session
+                            import gc
+                            tf.keras.backend.clear_session()
+                            gc.collect()
+                            
+                            # 2. Get Model Path
+                            model_path = os.path.join(model_dir, model_id)
+                            model_root = model_dir
+                            if os.path.isdir(model_path):
+                                model_root = model_path
+                                for ext in ['model.keras', 'model.h5']:
+                                    if os.path.exists(os.path.join(model_path, ext)):
+                                        model_path = os.path.join(model_path, ext)
+                                        break
+                            
+                            # 3. Load Model
+                            from src.model_factory import get_custom_objects, compile_model
+                            from src.predictor import evaluate_model
+                            
+                            custom_objs = get_custom_objects()
+                            with tf.keras.utils.custom_object_scope(custom_objs):
+                                model = tf.keras.models.load_model(model_path, compile=False)
+                            
+                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                            
+                            # 4. Run Evaluation — Each model loads its OWN bundled data
+                            from src.predictor import evaluate_model
+                            import json as json_mod
+                            
+                            res = None
+                            eval_source = "Unknown"
+                            
+                            # Strategy 1: Load data from model's own data_source in meta.json
+                            meta_path = os.path.join(model_root, "meta.json")
+                            if os.path.exists(meta_path):
+                                with open(meta_path, 'r') as f:
+                                    m_meta = json_mod.load(f)
+                                orig_ds = m_meta.get('data_source', '').replace('\\', '/')
+                                
+                                if orig_ds and os.path.exists(orig_ds):
+                                    # Point config to model's original processed data
+                                    temp_cfg = copy.deepcopy(cfg)
+                                    temp_cfg['paths']['processed_dir'] = orig_ds
+                                    try:
+                                        res = evaluate_model(model, temp_cfg, data=None, scaler_dir=model_root)
+                                        eval_source = "Bundled Data"
+                                    except Exception as e2:
+                                        st.warning(f"Data bundled gagal untuk {model_id}: {e2}")
+                            
+                            # Strategy 2: Fall back to active preprocessing data
+                            if res is None:
+                                active_prep = st.session_state.get('prep_metadata', None)
+                                if active_prep is not None and active_prep.get('X_train') is not None:
+                                    expected_n = model.input_shape[2]
+                                    if active_prep['X_train'].shape[2] == expected_n:
+                                        scaler_dir = model_root if os.path.isdir(model_root) else None
+                                        res = evaluate_model(model, cfg, data=active_prep, scaler_dir=scaler_dir)
+                                        eval_source = "Active Data"
+                                    else:
+                                        raise ValueError(
+                                            f"Feature mismatch: model expects {expected_n}, "
+                                            f"active data has {active_prep['X_train'].shape[2]}. "
+                                            f"Data bundled juga tidak tersedia."
+                                        )
+                                else:
+                                    raise ValueError(
+                                        f"Tidak ada data untuk evaluasi. "
+                                        f"data_source di meta.json tidak valid dan preprocessing belum dijalankan."
+                                    )
+
+                            
+                            # 5. Extract Metrics
+                            m_test = res['metrics_test']
+                            comparison_results.append({
+                                'Model ID': model_id,
+                                'R²': m_test['r2'],
+                                'MAE': m_test['mae'],
+                                'RMSE': m_test['rmse'],
+                                'MAPE (%)': m_test['mape'],
+                                'Features': model.input_shape[2],
+                                'Lookback': model.input_shape[1],
+                                'Verified On': eval_source
+                            })
+                            
+                        except Exception as e:
+                            st.error(f"Gagal mengevaluasi {model_id}: {e}")
+                            comparison_results.append({
+                                'Model ID': model_id,
+                                'R²': 0, 'MAE': 999, 'RMSE': 999, 'MAPE (%)': 999,
+                                'Features': 'Error', 'Lookback': 'Error'
+                            })
+                        
+                        progress_bar.progress((i + 1) / len(selected_models))
+                        status_text.empty()
+                    
+                    st.session_state.comparison_df = pd.DataFrame(comparison_results)
+                    st.success("Analisis perbandingan selesai!")
+
+            # Display Results if they exist in session
+            if 'comparison_df' in st.session_state:
+                df_comp = st.session_state.comparison_df
+                
+                # Metrics Table
+                st.markdown("#### 2. Metrics Leaderboard")
+                
+                # Highlight best values
+                def highlight_max(s):
+                    is_max = s == s.max()
+                    return ['background-color: rgba(16, 185, 129, 0.2)' if v else '' for v in is_max]
+                
+                def highlight_min(s):
+                    is_min = s == s.min()
+                    return ['background-color: rgba(16, 185, 129, 0.2)' if v else '' for v in is_min]
+
+                styled_df = df_comp.style.format({
+                    'R²': '{:.4f}', 'MAE': '{:.4f}', 'RMSE': '{:.4f}', 'MAPE (%)': '{:.2f}'
+                }).apply(highlight_max, subset=['R²']).apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE (%)'])
+                
+                st.dataframe(styled_df, use_container_width=True)
+                
+                # Visualization
+                st.markdown("#### 3. Visual Comparison")
+                c1, c2 = st.columns(2)
+                
+                with c1:
+                    fig_r2 = px.bar(df_comp, x='Model ID', y='R²', color='R²', 
+                                   title="R² Score (Higher is Better)",
+                                   color_continuous_scale='Viridis')
+                    fig_r2.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig_r2, use_container_width=True)
+                
+                with c2:
+                    fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='MAE',
+                                    title="MAE Score (Lower is Better)",
+                                    color_continuous_scale='Reds_r')
+                    fig_mae.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig_mae, use_container_width=True)
+                
+                # Radar Chart
+                st.markdown("#### 4. Performance Radar")
+                radar_data = df_comp.copy()
+                cols_to_norm = ['R²', 'MAE', 'RMSE', 'MAPE (%)']
+                for col in cols_to_norm:
+                    if col == 'R²':
+                        radar_data[col] = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
+                    else:
+                        norm = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
+                        radar_data[col] = 1 - norm
+                
+                fig_radar = go.Figure()
+                for i, row in radar_data.iterrows():
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=[row['R²'], row['MAE'], row['RMSE'], row['MAPE (%)']],
+                        theta=['R²', 'MAE (Inverted)', 'RMSE (Inverted)', 'MAPE (Inverted)'],
+                        fill='toself',
+                        name=row['Model ID']
+                    ))
+                
+                fig_radar.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+                    showlegend=True,
+                    template="plotly_dark",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    height=500
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+        else:
+            st.warning("Belum ada model tersimpan di folder `models/`.")
+    else:
+        st.error("Folder models/ tidak ditemukan.")
 
 
 # --- TAB 5: LOGS ---
