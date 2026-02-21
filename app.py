@@ -1599,6 +1599,10 @@ with tab_train:
             
         with col_hp2:
             st.markdown("**Optimization**")
+            
+            _loss_opts = ['mse', 'huber', 'mae']
+            hp['loss_fn'] = st.selectbox("Loss Function", _loss_opts, index=_loss_opts.index(hp.get('loss_fn', 'mse')) if hp.get('loss_fn', 'mse') in _loss_opts else 0)
+            
             hp['learning_rate'] = st.number_input("Learning Rate", value=hp.get('learning_rate', 0.0001),
                                                    format="%.6f", step=0.0001)
             _bs_opts = sorted(set([16, 32, 64, 128] + [hp.get('batch_size', 32)]))
@@ -1740,7 +1744,7 @@ with tab_train:
                 sys.stdout.flush()
 
                 custom_id = m_name_train.strip() if m_name_train.strip() else None
-                model, history, meta = train_model(cfg, extra_callbacks=[live_cb], custom_model_id=custom_id)
+                model, history, meta = train_model(cfg, extra_callbacks=[live_cb], custom_model_id=custom_id, loss_fn=hp.get('loss_fn', 'mse'))
                 
                 # Success & Persist
                 st.session_state.training_history = history.history
@@ -1863,6 +1867,8 @@ with tab_batch:
                     q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key=f"q_nl_{q_arch_val}")
                     
                 with cq2:
+                    _loss_opts = ['mse', 'huber', 'mae']
+                    q_hp['loss_fn'] = st.selectbox("Loss Function", _loss_opts, index=_loss_opts.index(q_hp.get('loss_fn', 'mse')) if q_hp.get('loss_fn', 'mse') in _loss_opts else 0, key=f"q_loss_{q_arch_val}")
                     q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key=f"q_lr_{q_arch_val}")
                     _bs_opts = [16, 32, 64, 128]
                     q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key=f"q_bs_{q_arch_val}")
@@ -2039,7 +2045,8 @@ with tab_batch:
 
                         try:
                             from src.trainer import train_model
-                            model, history, meta = train_model(batch_cfg, custom_model_id=item['name'], extra_callbacks=[BatchLiveCallback()])
+                            loss_function = batch_cfg['model']['hyperparameters'].get('loss_fn', 'mse')
+                            model, history, meta = train_model(batch_cfg, custom_model_id=item['name'], extra_callbacks=[BatchLiveCallback()], loss_fn=loss_function)
                             st.session_state.batch_results.append({"name": item['name'], "status": "✅ Success", "loss": min(history.history['val_loss'])})
                         except Exception as e:
                             st.session_state.batch_results.append({"name": item['name'], "status": "❌ Failed", "error": str(e)})
@@ -2338,11 +2345,14 @@ with tab_tuning:
         with cols[2]:
             st.write(f"**Data Status:** {'✅ Ready' if has_data else '❌ Missing'}")
         
-        tune_col_d1, tune_col_d2 = st.columns([1, 2])
+        tune_col_d1, tune_col_loss, tune_col_d2 = st.columns([1, 1, 2])
         with tune_col_d1:
             tune_device = st.radio("🖥️ Device", ["CPU", "GPU"], index=0, 
                                    horizontal=True, key="tune_device_bottom",
                                    help="CPU direkomendasikan untuk stabilitas.")
+        with tune_col_loss:
+            _opt_loss = ['mse', 'huber', 'mae']
+            tune_loss_fn = st.selectbox("Loss Function", _opt_loss, index=_opt_loss.index(cfg['model']['hyperparameters'].get('loss_fn', 'mse')) if cfg['model']['hyperparameters'].get('loss_fn') in _opt_loss else 0, key="tune_loss_fn")
         with tune_col_d2:
             run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", width="stretch", 
                                   disabled=not has_data, key="btn_tune_tab")
@@ -2476,7 +2486,8 @@ with tab_tuning:
             
             with contextlib.redirect_stdout(stdout_capture):
                 from src.trainer import run_optuna_tuning
-                best, study = run_optuna_tuning(cfg, extra_callbacks=[live_monitor], force_cpu=use_cpu)
+                loss_function = tune_loss_fn if 'tune_loss_fn' in locals() else 'mse'
+                best, study = run_optuna_tuning(cfg, extra_callbacks=[live_monitor], force_cpu=use_cpu, loss_fn=loss_function)
             
             # Save results for the Tuning Monitor tab
             trial_data = []
@@ -2680,12 +2691,12 @@ with tab_eval:
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         metrics_display = [
-            ("MAE", m_test['mae'], " kW"),
-            ("RMSE", m_test['rmse'], " kW"),
             ("R\u00b2", m_test['r2'], ""),
-            ("WMAPE", m_test.get('wmape', m_test['mape']), "%"),
+            ("MAE", m_test['mae'], " kW"),
+            ("nMAE", m_test.get('norm_mae', 0) * 100, " %"),
+            ("RMSE", m_test['rmse'], " kW"),
+            ("nRMSE", m_test.get('norm_rmse', 0) * 100, " %"),
             ("Train Time", train_time_str, "s"),
-            ("R\u00b2 Overfit \u0394", r2_diff, ""),
         ]
         for col, (name, val, unit) in zip([col1, col2, col3, col4, col5, col6], metrics_display):
             with col:
@@ -2709,12 +2720,11 @@ with tab_eval:
         m_test_prod = results.get('metrics_test_productive', {})
         
         metrics_rows = [
+            ['R\u00b2', f"{m_train['r2']:.4f}", f"{m_test['r2']:.4f}"],
             ['MAE (kW)', f"{m_train['mae']:.4f}", f"{m_test['mae']:.4f}"],
+            ['nMAE (%)', f"{m_train.get('norm_mae', 0)*100:.2f}", f"{m_test.get('norm_mae', 0)*100:.2f}"],
             ['RMSE (kW)', f"{m_train['rmse']:.4f}", f"{m_test['rmse']:.4f}"],
-            ['R\u00b2 (All Hours)', f"{m_train['r2']:.4f}", f"{m_test['r2']:.4f}"],
-            ['WMAPE (%)', f"{m_train.get('wmape', 0):.2f}", f"{m_test.get('wmape', 0):.2f}"],
-            ['MAPE (%, capped)', f"{m_train['mape']:.2f}", f"{m_test['mape']:.2f}"],
-            ['NormMAE (%)', f"{m_train.get('norm_mae', 0)*100:.2f}", f"{m_test.get('norm_mae', 0)*100:.2f}"],
+            ['nRMSE (%)', f"{m_train.get('norm_rmse', 0)*100:.2f}", f"{m_test.get('norm_rmse', 0)*100:.2f}"],
         ]
         if m_test_prod:
             metrics_rows.insert(3, ['R² (Productive)', 
@@ -3213,16 +3223,15 @@ with tab_compare:
                                 
                                 comparison_results.append({
                                     'Model ID': model_id,
-                                    'Test R²': m_test['r2'],
-                                    'Train R²': m_train['r2'],
-                                    'Overfit Δ': m_train['r2'] - m_test['r2'],
+                                    'R²': m_test['r2'],
                                     'MAE': m_test['mae'],
+                                    'nMAE (%)': m_test.get('norm_mae', 0) * 100,
                                     'RMSE': m_test['rmse'],
-                                    'MAPE (%)': m_test['mape'],
+                                    'nRMSE (%)': m_test.get('norm_rmse', 0) * 100,
                                     'Train Time (s)': train_time,
-                                    'Features N': model.input_shape[2],
+                                    'Features N': getattr(model, 'input_shape', [0,0,0])[2] if hasattr(model, 'input_shape') else '?',
                                     'Feature List': feat_text,
-                                    'Lookback': model.input_shape[1],
+                                    'Lookback': getattr(model, 'input_shape', [0,0,0])[1] if hasattr(model, 'input_shape') else '?',
                                     'Verified On': eval_source
                                 })
                                 print(f"      ✅ Done (R²: {m_test['r2']:.4f})")
@@ -3233,8 +3242,8 @@ with tab_compare:
                                 print(f"      ❌ ERROR: {err_info}")
                                 comparison_results.append({
                                     'Model ID': model_id,
-                                    'Test R²': 0, 'Train R²': 0, 'Overfit Δ': 0, 
-                                    'MAE': 999, 'RMSE': 999, 'MAPE (%)': 999, 'Train Time (s)': 0,
+                                    'R²': 0, 'MAE': 999, 'nMAE (%)': 999, 
+                                    'RMSE': 999, 'nRMSE (%)': 999, 'Train Time (s)': 0,
                                     'Features N': 'Error', 'Feature List': 'Error',
                                     'Lookback': 'Error', 'Verified On': 'Error'
                                 })
@@ -3266,9 +3275,9 @@ with tab_compare:
                     return ['background-color: rgba(16, 185, 129, 0.2)' if v else '' for v in is_min]
 
                 styled_df = df_comp.style.format({
-                    'Test R²': '{:.4f}', 'Train R²': '{:.4f}', 'Overfit Δ': '{:.4f}',
-                    'MAE': '{:.4f}', 'RMSE': '{:.4f}', 'MAPE (%)': '{:.2f}', 'Train Time (s)': '{:.1f}'
-                }).apply(highlight_max, subset=['Test R²']).apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE (%)', 'Overfit Δ'])
+                    'R²': '{:.4f}', 'MAE': '{:.4f}', 'nMAE (%)': '{:.2f}',
+                    'RMSE': '{:.4f}', 'nRMSE (%)': '{:.2f}', 'Train Time (s)': '{:.1f}'
+                }).apply(highlight_max, subset=['R²']).apply(highlight_min, subset=['MAE', 'nMAE (%)', 'RMSE', 'nRMSE (%)'])
                 
                 st.dataframe(styled_df, width="stretch")
                 
@@ -3304,8 +3313,8 @@ with tab_compare:
                 # First Row: R2 and MAE
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_r2 = px.bar(df_comp, x='Model ID', y='Test R²', color='Test R²', 
-                                   title="Test R² Score (Higher is Better)",
+                    fig_r2 = px.bar(df_comp, x='Model ID', y='R²', color='R²', 
+                                   title="R² Score (Higher is Better)",
                                    color_continuous_scale='Viridis')
                     fig_r2.update_layout(template="plotly_dark", height=400)
                     st.plotly_chart(fig_r2, width="stretch")
@@ -3325,19 +3334,19 @@ with tab_compare:
                     fig_time.update_layout(template="plotly_dark", height=400)
                     st.plotly_chart(fig_time, width="stretch")
                 with c4:
-                    fig_overfit = px.bar(df_comp, x='Model ID', y='Overfit Δ', color='Overfit Δ',
-                                    title="Overfit Δ: Train R² - Test R² (Closer to 0 is Better)",
-                                    color_continuous_scale='RdBu_r')
-                    fig_overfit.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_overfit, width="stretch")
+                    fig_rmse = px.bar(df_comp, x='Model ID', y='RMSE', color='RMSE',
+                                    title="RMSE (Lower is Safer/Better)",
+                                    color_continuous_scale='Purples_r')
+                    fig_rmse.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig_rmse, width="stretch")
                 
                 
                 # Radar Chart
                 st.markdown("#### 4. Performance Radar")
                 radar_data = df_comp.copy()
-                cols_to_norm = ['Test R²', 'MAE', 'RMSE', 'MAPE (%)']
+                cols_to_norm = ['R²', 'MAE', 'nMAE (%)', 'RMSE', 'nRMSE (%)']
                 for col in cols_to_norm:
-                    if col == 'Test R²':
+                    if col == 'R²':
                         radar_data[col] = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
                     else:
                         norm = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
@@ -3346,8 +3355,8 @@ with tab_compare:
                 fig_radar = go.Figure()
                 for i, row in radar_data.iterrows():
                     fig_radar.add_trace(go.Scatterpolar(
-                        r=[row['Test R²'], row['MAE'], row['RMSE'], row['MAPE (%)']],
-                        theta=['Test R²', 'MAE (Inverted)', 'RMSE (Inverted)', 'MAPE (Inverted)'],
+                        r=[row['R²'], row['MAE'], row['RMSE'], row['nMAE (%)'], row['nRMSE (%)']],
+                        theta=['R²', 'MAE (Inverted)', 'RMSE (Inverted)', 'nMAE (Inverted)', 'nRMSE (Inverted)'],
                         fill='toself',
                         name=row['Model ID']
                     ))

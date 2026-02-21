@@ -1,0 +1,653 @@
+arXiv:2505.15151v1  [cs.LG]  21 May 2025
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+1
+Time Tracker: Mixture-of-Experts-Enhanced Foundation Time Series
+Forecasting Model with Decoupled Training Pipelines
+Xiaohou Shi, Ke Li, Aobo Liang and Yan Sun
+Abstract—In the past few years, time series foundation models
+have achieved superior predicting accuracy. However, real-world
+time series often exhibit significant diversity in their temporal
+patterns across different time spans and domains, making it
+challenging for a single model architecture to fit all complex
+scenarios. In addition, time series data may have multiple vari-
+ables exhibiting complex correlations between each other. Recent
+mainstream works have focused on modeling times series in a
+channel-independent manner in both pretraining and finetuning
+stages, overlooking the valuable inter-series dependencies. To
+this end, we propose Time Tracker for better predictions on
+multivariate time series data. Firstly, we leverage sparse mixture
+of experts (MoE) within Transformers to handle the modeling
+of diverse time series patterns, thereby alleviating the learning
+difficulties of a single model while improving its generalization.
+Besides, we propose Any-variate Attention, enabling a unified
+model structure to seamlessly handle both univariate and mul-
+tivariate time series, thereby supporting channel-independent
+modeling during pretraining and channel-mixed modeling for
+finetuning. Furthermore, we design a graph learning module that
+constructs relations among sequences from frequency-domain
+features, providing more precise guidance to capture inter-series
+dependencies in channel-mixed modeling. Based on these ad-
+vancements, Time Tracker achieves state-of-the-art performance
+in predicting accuracy, model generalization and adaptability.
+Index Terms—Time series forecasting, foundation model, mix-
+ture of experts, graph learning
+I. INTRODUCTION
+R
+ECENT advances in time series forecasting have demon-
+strated the effectiveness of foundation models, with
+Transformers emerging as the pivotal architecture. With the
+auxiliary information of endogenous, exogenous variables and
+cross-domain features from historical contexts, time series
+foundation models are designed to accommodate a wider
+spectrum of prediction scenarios. The concept of unified
+forecasting is gradually reshaping the conventional practice
+of task-specific training strategy.
+However, existing models face performance bottlenecks in
+multivariate forecasting. Firstly, as shown in Fig. 1, real-
+world time series are inherently heterogeneous: (a) within a
+single sequence, and across different variables from (b) the
+same or (c) different scenarios. The complex temporal patterns
+and shifting data distributions pose significant challenges for
+a single model to extract high-quality features. Meanwhile,
+recent research has mainly focused on building encoder-only
+architectures to model temporal dependencies across tokens.
+S. Xiao and K. Li are with the China Telecom Research Institute, Beijing
+102209, China. E-mail: shixh6@chinatelecom.cn; lik24@chinatelecom.cn.
+A. Liang and Y. Sun are with the School of Computer Science (Na-
+tional Pilot Software Engineering School), Beijing University of Posts and
+Telecommunications, Beijing 100876, China. E-mail: liangaobo@bupt.edu.cn;
+sunyan@bupt.edu.cn.
+Dataset 1
+Dataset 2
+Dataset 3
+(a):  The data distribution may change within a single time series.
+(c):  Data from different sources show significant differences in their temporal patterns.
+(b): Temporal patterns of different variables from the same data source are homoge-
+       neous and heterogeneous.
+Fig. 1. Homogeneous or heterogeneous time series may exhibit differences in
+data distribution across (a) different time intervals within a single sequence,
+(b) varying sequences from the same data source and (c) time series from
+different data sources.
+Although these models often achieve higher accuracy on
+specific datasets, they tend to suffer from limited generaliza-
+tion. In contrast, generative decoder-only architectures offer
+better scalability and are becoming an emerging focus of
+research. Moreover, multivariate time series usually exhibit
+complex inter-series dependencies, including immediate or
+delayed correlations in trends and seasonality. Most previous
+works adopt channel-independent modeling for both pretrain-
+ing and finetuning stages, where sequences from different
+variables are processed independently. Considering the sig-
+nificant variation in the number of variables across different
+real-world applications, it is impractical to rely on a single
+model structure for all possible multivariate forecasting tasks.
+Nevertheless, it is undeniable that the channel-independent
+strategy overlooks valuable inter-variable dependencies, which
+may become a bottleneck limiting the model’s adaptability
+on specific datasets. Some recent works, such as Moirai(Woo
+et al., 2024) and Timer-XL(Liu et al., 2024c), have established
+a unified training paradigm to support multivariate pretraining
+and finetuning. However, these models try to establish relations
+among tokens from all input variables without any filtering
+mechanisms. With the assumption that all input sequences are
+interrelated, the model may face increased learning cost and
+introduce noise to tokens from weakly correlated or unrelated
+variables.
+To address the aforementioned issues, we propose Time
+Tracker, a novel generative time series forecasting model
+architecture. To tackle the problem of highly heterogeneous
+distributions of time series, we are inspired by sparse mix-
+ture of experts (MOE) to assign time series with diverse
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+2
+distributions to refined experts. Such design alleviates the
+learning difficulty of a single neural network in capturing
+specific temporal patterns while reducing the computational
+cost during inference. In addition, we propose Any-variate
+Attention (AVA) to enable a unified model structure to seam-
+lessly handle both univariate and multivariate time series
+causally. Typically, a well pretrained time series foundation
+model should be equipped with generalizable parameters by
+training it on data with diverse distributions, achieving robust
+performance across varied tasks and domains. Considering that
+the variable numbers and the relations among them may vary
+significantly across application scenarios, it is unrealistic to
+generalize the inter-series dependencies of different domains.
+Therefore, we adopt the channel-independent strategy during
+pretraining to ensure the model’s generalization capacity.
+To further adapt the pretrained model to unseen datasets,
+we perform finetuning stage which in contrast transfers AVA
+to capturing data-specific inter-series dependencies. We first
+design a frequency-based graph learning layer to compute the
+relationship probability between the variables, then use the
+reparameterization technique to generate the adjacency matrix.
+We inject such relational information into AVA through the
+Kronecker product of the adjacency matrix and the causal
+attention time mask matrix. Consequently, the model can
+precisely control the interactions of tokens between different
+variables in a generative manner. In summary, our main
+contributions are as follows:
+1) We propose to assign sequence tokens belonging to
+different data distributions to specific expert networks
+to reduce the learning difficulty of specific data distri-
+butions and improve prediction performance.
+2) We propose to combine the context-aware graph neural
+network with causal attention to better adapt to the
+downstream tasks of multivariate metric data. While the
+model works in a generative manner within different
+variables, it captures multivariable dependencies more
+accurately.
+3) We pretrain our model on the Unified Time Series
+Dataset (UTSD) and conduct experiments on multivari-
+ate forecasting, zero-shot learning and few-shot learning.
+Timer Tracker achieves SOTA performance compared to
+other benchmark models.
+II. RELATED WORK
+A. Large Time Series Models
+Recent advances in pre-training on large-scale sequence data
+have significantly benefited modality understanding in natural
+language processing(Grattafiori et al., 2024) and computer
+vision(Liu et al., 2021; Kirillov et al., 2023). The similar
+trends has been extended to time series modeling. However,
+most methods(Wu et al., 2021; Zeng et al., 2023; Nie et al.,
+2023) are limited in model scale or in-domain applicability,
+which results in weak generalization ability. When encounter-
+ing temporal patterns or data distributions previously unseen,
+these models often require re-training or extensive fine-tuning,
+significantly increasing deployment cost and reducing practi-
+cal scalability. To address this limitation, LTSM(Liu et al.,
+2024b) are being explored through large-scale pre-training to
+enhance zero-shot generalization across diverse scenarios. A
+key challenge lies in managing the inherent heterogeneity of
+time series data, including variations in domain, frequency
+and semantics. Some approaches introduce tokenization re-
+programming framework(Chen, 2024) and attempt to leverage
+the generalization capability of existing LLMs to adapt to the
+data distribution of time series. Time-LLM(Jin et al., 2024)
+generates prompt embeddings by manually crafting dataset-
+specific prompts and proposes a reprogramming method to
+map time series into text prototypes, enabling direct prediction
+using existing LLMs. Lag-Llama(Rasul et al., 2023) maps time
+series into text prototypes by combining sequence samples at
+specific time lags with timestamps at multiple time intervals.
+Chronos(Ansari et al., 2024) tokenizes time series into discrete
+bins through simple scaling and quantization of real values,
+achieving time series forecasting through minimizing the loss
+of a classification task. However, these methods are either
+reliant on the quality of training datasets or require manual
+specification of prompts or data sampling rules, which results
+in higher training costs. Alternatively, recent studies focus
+on model architectures designed specifically for time series
+forecasting. MOMENT(Goswami et al., 2024) follows the
+paradigm of pre-trained NLP models such as BERT(Devlin
+et al., 2019) by employing a reconstruction-based objective to
+train a Transformer Encoder as a feature extractor, with task-
+specific output heads designed for different downstream tasks.
+Although MOMENT is a general-purpose model tailored for
+time series analysis, it still requires fine-tuning for specific
+downstream tasks and cannot be directly applied to forecasting
+tasks. TimesFM(Das et al., 2024) employs randomly sized
+masks to enable training with variable-length inputs to fixed-
+length outputs. Timer(Liu et al., 2024b) performs next-token
+prediction and uses the causal attention mechanism to model
+time series in an autoregressive manner. Nevertheless, these
+models process time series in a channel-independent way and
+overlook the inter-series dependencies among different vari-
+ables in both pre-training and fine-tuning stages. To address
+this issue, Moirai(Woo et al., 2024) proposes a unified training
+strategy that allows for multivariate time series predictions.
+However, Moirai implicitly assumes that the input variables
+from the same data source are mutually correlated, which
+may introduce noise to each token due to capturing the
+dependencies of heterogeneous sequences.
+B. Mixture of Experts
+Mixture of Experts (MoE) has emerged as a solution to scale
+model capacity efficiently without proportionally increasing
+computational costs. Through dynamically routing inputs to
+specialized subnetworks, MOE enables the construction of
+large-scale models with sparse and resource-efficient compu-
+tation. Recent works like Time-MOE(Shi et al., 2024) and
+Moirai-MOE(Liu et al., 2024d) assign different tokens to
+distinct experts to enhance the scalability and convergency
+of the original models. However, the in-depth motivation of
+the token-wise routing approach is ambiguous and ignore the
+statistical information of the original time series. In addition,
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+3
+Univariate Time Series
+Instance Norm
+Time Tracker
+Univariate Encoder
+Patch-wise Tokenization
+Multivariate Time Series
+Instance Norm
+Time Tracker
+Univariate Encoder
+Patch-wise Tokenization
+Graph Learning Layer
+Head
+Head
+Reverse Instance Norm
+Reverse Instance Norm
+Time Tracker
+Univariate Decoder
+Time Tracker
+Multivariate Decoder
+Attention
+Causal Masking
+LayerNorm
+MOE Layer
+LayerNorm
+Attention
+Causal Masking
+LayerNorm
+MOE Layer
+LayerNorm
+Router
+1
+2
+𝒏𝒑
+Univariate Time Series
+Multivariate Time Series
+𝑋𝑖𝑛∈ℝ𝐵×1×𝐿
+𝑋𝑜𝑢𝑡∈ℝ𝐵×1×𝐹
+𝐻∈ℝ𝐵×𝑁×𝑑
+𝐻(𝐽) ∈ℝ𝐵×𝑁×𝑑
+෠𝑋𝑜𝑢𝑡∈ℝ𝐵×1×𝐹
+𝐾𝑟𝑜𝑛
+𝑋𝑖𝑛∈ℝ𝐵×𝐶×𝐿
+⋯
+𝑲= 𝟐
+𝐻∈ℝ(𝐵∗𝐶)×𝑁×𝑑
+𝐻(𝐽) ∈ℝ𝐵×𝐶×𝑁×𝑑
+× 𝑱𝑪𝑰
+× 𝑱𝑪𝑴
+× 𝑱𝑪𝑰
+× 𝑱𝑪𝑴
+෠𝑋𝑜𝑢𝑡∈ℝ𝐵×𝐶×𝐹
+𝑋𝑜𝑢𝑡∈ℝ𝐵×𝐶×𝐹
+𝐆∈ℝ𝐵×𝐶×𝐶
+MOE Layer
+Pretraining Workflow
+Finetuning Workflow
+Graph Learning Layer
+FFT
+Gumbel Softmax
+Amplitude Distance
+Fig. 2. The model architecture of Time Tracker. The workflow of pretraining stage and finetune stage is on the left and right side respectively.
+existing works follow the auxiliary-loss-based load-balance
+strategy in Switch transformers(Fedus et al., 2022) which may
+lead to suboptimal performance due to imbalanced loss weight
+assignment and potential difficulties in achieving equitable
+expert utilization(Dai et al., 2024).
+C. Graph Neural Networks
+GNN has been widely used for spatial temporal modeling
+in multivariate forecasting. Previous works such as STGCN
+and Graph Wavenet use GNN to model sensors of different
+roads as nodes in the graph structure. Although the predicting
+performance is improved, the model needs predefined graph
+structure, which is usually not achievable in more complex sce-
+narios. MTGNN introduces an adaptive graph learning layer
+to automatically generate an optimal adjacency matrix tailored
+to specific data. However, when faced with new scenarios
+involving different nodes, the model requires retraining, which
+limits its scalability. To address this issue, STEP proposes an
+instance-wise graph learning module to adapt to downstream
+tasks with any possible variables. STEP combines Bernoulli
+sampling with gumbel softmax so that the model can generate
+adjacency matrix based on the similarity between embeddings
+of different time series.
+III. METHODOLOGY
+In this section, we propose Time Tracker, a fundamental
+time series model built for multivariate forecasting. As shown
+in Fig 2, Time Tracker is based on a decoder-only Transformer
+architecture. We pretrain the model in the channel-independent
+manner where each univariate time series is fed into the
+model separately. In this setup, all model parameters are
+shared across different time series to capture diverse tempo-
+ral evaluation patterns, therefore enhancing its generalization
+ability to unseen or heterogeneous time series data. To achieve
+more accurate prediction, we argue to capture inter-series
+dependencies while applying the model on specific datasets.
+In the fine-tuning stage, we design an adaptive graph learning
+layer to generate instance-wise adjacency matrices. We further
+combine the causal mask with the adjacency matrix to capture
+inter-series dependencies while keeping the autoregressive
+predicting scheme.
+A. Patch-wise Next Token Prediction
+Considering the input multivariate time series data Xin =
+{x1,t, x2,t, ..., xC,t}L
+t=1, our objective is to predict the future
+values Xout = {x1,t, x2,t, ..., xC,t}L+F
+t=L+1, where C denotes
+the variable dimension, L is the length of historical look-
+back window and F represents the forecasting horizons. We
+first segment each series into Xp = {p1,τ, p2,τ, ..., pC,τ}N
+τ=1
+where each patch pi,j = xi,(j−1)P +1:jP corresponds to P
+consecutive time points from the input series. The patches
+are extracted using a sliding window with stride S, producing
+N = ⌈L−P
+S
++ 1⌉patch-wise tokens. We set F = P so
+that the model learns to predict the next patch of length P
+given the previous N −1 patches. We pass each token in
+Xp through a linear projector to form multivariate patch-wise
+tokens H = {h1,τ, h2,τ, ..., hC,τ}N
+τ=1 for further processing,
+where hi,j ∈Rd and d is the token dimension.
+B. Frequency-based Adaptive Graph Learning Layer
+To capture the underlying relationships among time se-
+ries, we explore the similarity between different series in
+the frequency domain. Unlike direct modeling in the time
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+4
+domain, this approach allows us to extract invariant spectral
+features that are more robust to localized variations and more
+intuitive in terms of representing periodic patterns. There-
+fore, it facilitates the learning of more stable and gener-
+alizable inter-series relationships. We use real fast Fourier
+transform(RFFT) to represent Xin in the frequency domain,
+denoted as Xf
+in ∈RC×(1+ L
+2 ). Subsequently, we compute the
+differences in amplitude values across various frequencies to
+derive a probability matrix ˜G that quantifies the inter-variable
+correlations, as shown in eq 1:
+Xf
+in = RFFT(Xin) = {xf
+1,t, xf
+2,t, ..., xf
+C,t}
+1+ L
+2
+t=1
+Di,j =
+X1+ L
+2
+t=1
+xf
+i,t −xf
+j,t
+ , for i, j ∈{1, 2, ..., C}
+˜Gi,j =
+(
+αDi,j
+argmax(D)
+if i ̸= j
+1
+if i = j
+,
+(1)
+where α ∈(0, 1) is the weighting factor to avoid absolute
+relationship between different variables. Given the probabil-
+ity matrix, we sample a binary adjacency matrix A using
+the Gumbel-Softmax with reparameterization trick to enable
+differentiable Bernoulli sampling. Specifically, we introduce a
+random value ϵ ∈R2 sampled from Gumbel(0, 1) distribution
+and compute G through eq 2, where τ →0 is the temperature
+parameter to achieve approximate Bernoulli sampling.
+Gi,j = Softmax(( ˜Gi,j + ϵ)/τ)
+(2)
+C. Any-variate Causal Attention
+The basic causal attention mechanism constrains each token
+to focus only on preceding tokens through a causal mask. Prior
+works typically apply this approach to single-channel data or
+channel-independent models, overlooking inter-series depen-
+dencies. To address this, we aim to develop an any-variate
+causal attention mechanism that incorporates cross-variable
+information while preserving temporal causality. Following
+(Woo et al., 2024), we flatten the multivariate tokens H to
+R(C∗N)×d and calculate the attention scores as defined in eq
+3:
+˜
+A(i−1)N+m,(j−1)N+n =(WQhi,m)⊤RΘ,m−n(WKhj,n)
++ u · 1(i = j) + v · 1(i ̸= j),
+i, j ∈{1, 2, ..., C}, m, n ∈{1, 2, ..., N} ,
+(3)
+where WQ, WK ∈Rd×d are the weight matrices, RΘ refers
+to the rotary matrix(Su et al., 2024), 1 is the indicator
+function and u, v are two learnable parameters that ensure
+the permutation equivalence of A across variables. We further
+use a causal mask M defined in eq 6 to properly construct
+the causal relation among tokens within different variables.
+We first calculate the Kronecker product of the adjacency
+matrix G ∈RC×C and the temporal causal mask T ∈RN×N
+and save the results in ˜M, as defined in eq 4. T is a lower
+triangular mask that masks the attention scores from each
+token to future positions. The temporal constraint is then
+broadcast to related variables via the adjacency matrix G.
+Specifically, for any hi,m and hj,n with j ̸= i, if Gi,j = 1,
+then hi,m and hj,n are mutually dependent for all n ≤m.
+˜M(i−1)N+m,(j−1)N+n = Gi,jTm,n ,
+Tm,n =
+(
+0
+if m ≤n
+1
+otherwise ,
+i, j ∈{1, 2, ..., C}, m, n ∈{1, 2, ..., N} ,
+(4)
+Subsequently, we construct the mask matrix M through eq
+5. Finally, we apply M to the attention scores A to establish
+causal and variable-wise dependencies among the multivariate
+tokens, as defined in eq 6:
+Mi,j = mask( ˜Mi,j), i, j ∈{1, 2, ..., C ∗N},
+mask(x) =
+(
+−∞
+if x = 0
+1
+otherwise ,
+(5)
+Attention(H(ℓ)) = Unflat
+
+S · Flat(WV H(ℓ))
+
+S(ℓ) = Softmax(A + M
+√
+d
+)
+(6)
+where WV
+∈Rd×d is the weight matrix for the values
+vectors, S(ℓ) is the attention scores, ℓ∈{1, 2, ..., J} and J
+is the number of model layers. Note that H(1) refers to the
+results of patch-wise tokens, Flat and Unflat are the functions
+that convert the shape of inputs to R(C∗N)×d and RC×N×d
+respectively.
+D. Channel-wise Mixture of Experts
+Real-world time series often contain diverse and non-
+stationary patterns across different variables, making it difficult
+for a single model to generalize well across all conditions(Sun
+et al., 2024). In addition, time series data inherently exhibit
+strict temporal dependencies, where adjacent tokens are often
+semantically correlated. This motivate us to assign expert
+networks to tokens within the same univariate sequence to
+enhance the model’s stability and expressiveness. Specifically,
+we replace the each feedforward network (FFN)(Vaswani
+et al., 2017) with an MOE layer, containing ns shared experts
+and np private experts. Each expert network keeps the same
+archetecture of a standard FFN. We design a token cluster
+G ∈Rnp×d to match the tokens within a univariate sequence
+to the private expert responsible for the corresponding data
+distribution. To avoid the issue of routing collapse(Shazeer
+et al., 2017), we introduce a channel-wise bias factor b ∈Rnp
+to achieve auxiliary-loss-free load balance(Wang et al., 2024).
+The entire computation process of the attention and MOE layer
+in algorithm 1, where the function Attn(·) corresponds to eq
+6, K refers to the top-k elements and S FFN, P FFN are the
+shared and private experts.
+E. Pre-training Workflow
+Pretrained models are designed to capture generic and
+transferable patterns from large-scale data, enabling better
+generalization across different tasks and domains(Devlin et al.,
+JOURNAL OF LATEX CLASS FILES, VOL. 18, NO. 9, SEPTEMBER 2020
+5
+Algorithm 1 The implementation of the Encoder
+Input: Input sequence tokens H(ℓ) ∈RC×N×d
+Output: Output representations H(ℓ+1) ∈RC×N×d
+1: ˆH(ℓ) ∈RC×N×d ←RMSNorm
+ Attn(H(ℓ)) + H(ℓ)
+2: s ∈RC×N×np ←ˆH(l)(G(ℓ))⊤
+3: ¯s ∈RC×np ←Softmax
+
+1
+N
+PN
+i=1 s:,i,:
+
+4: Initialize empty vectors g ∈RC×N×np, c ∈Rnp
+5: for i = 1 to C do
+6:
+for j = 1 to np do
+7:
+if ¯si,j + b(ℓ)
+j
+∈TopK({¯si,k + b(ℓ)
+k |1 ≤k ≤np}, K)
+then
+8:
+gi,:,j ←¯si,j
+9:
+cj ←cj + 1
+10:
+else
+11:
+gi,:,j ←0
+12:
+end if
+13:
+end for
+14: end for
+15: ¯c ←
+1
+np
+Pnp
+i=1 ci
+16: for i = 1 to np do
+17:
+e = ¯c −ci
+18:
+b(ℓ)
+i
+= b(ℓ)
+i
++ u ∗sign(e)
+19: end for
+20: ˜H(ℓ+1)
+s
+∈RC×N×d ←
+1
+ns
+Pns
+i=1 S FFNi( ˆH(ℓ))
+21: ˜H(ℓ+1)
+p
+∈RC×N×d ←Pnp
+i=1 P FFNi( ˆH(ℓ)) ∗g:,:,i
+22: ˜H(ℓ+1) ∈RC×N×d ←˜H(ℓ+1)
+s
++ ˜H(ℓ+1)
+p
+23: H(ℓ+1) ∈RC×N×d ←RMSNorm( ˜H(ℓ+1) + ˆH(ℓ))
+24: return H(ℓ+1)
+2019). In the context of time series forecasting, processing
+each series individually encourages the model to learn diverse
+temporal patterns from individual series, thereby enhancing
+the model’s generalization capability(Nie et al., 2023). Be-
+sides, multivariate time series from different scenarios often
+exhibit significant discrepancies in both dimensionality and
+the underlying inter-series relationships. Modeling such het-
+erogeneous dependencies in a unified pretraining framework
+poses challenges in terms of scalability and representation
+consistency. Therefore, we adopt a channel-independent data
+loading strategy in the pretraining stage. Given a training
+dataset with numD multivariate subsets, we extract univariate
+sequences from each variable to construct the training samples.
+Specifically, for a multivariate subset Di with data in the shape
+of RCi×T , where T is the length of each time series and
+i ∈{1, 2, ..., numD}, we generate training instances of the
+shape 1 × (L + F). Accordingly, the total number of training
+samples extracted from Di is Ci × (T −L −F).
+F. Fine-tuning Workflow
+The primary objective in the fine-tuning stage is to adapt the
+pretrained model to the target dataset, allowing it to capture
+task-specific patterns that may not have been learned during
+pretraining. Previous works usually maintain consistent data
+loading strategies in both pretraining and fine-tuning stages,
+making it difficult for the model to balance the performance in
+zero-shot and few-shot tasks. Inspired from iTransformer(Liu
+et al., 2024a), we argue that capturing inter-series dependen-
+cies of multivariate data in specific datasets could provide
+better adaptability. This motivates us to introduce the graph
+learning module in the fine-tuning stage, enabling the model
+to additionally capture inter-series dependencies within mul-
+tivariate inputs. Different from the pretraining stage, we keep
+the original shape of multivariate instance as RC×(L+F ). For
+a batched input data Xin ∈RB×C×L, we first flatten it into
+the shape of R(B∗C)×1×L to maintain univariate processing
+in the first JCI layers, producing H(JCI) ∈R(B∗C)×1×N×D.
+Consequently, we concatenate the tokens and feed H(ℓCM) ∈
+RB×(C∗N)×D into the last JCM layers. Through the adjacency
+matrix and any-variate causal attention layers in SecIII-B and
+SecIII-C, we capture inter-series dependencies in a causal
+manner to achieve better adaptation.
+IV. EXPERIMENTS
+A. Datasets
+We follow the work of Timer and pretrain our model on
+Unified Time Series Dataset (UTSD)(Liu et al., 2024b). UTSD
+is a large time series dataset derived from publicly available
+online data repositories and real-world machine operation data.
+It covers seven major domains including energy, environment,
+health, IoT, nature, transportation, and networks, with up to 1
+billion time points. Each subset within UTSD is analyzed in
+terms of stationarity and predictability to ensure an appropriate
+level of inherent complexity. To evaluate the generality and
+adaptivity of our model, we also choose six well-known real-
+world datasets including Weather, Electricity, Traffic and ETT
+series. The details of these datasets are shown in table I. All
+these datasets can reached through previous works(Wu et al.,
+2021; Liu et al., 2024a).
+TABLE I
+STATISTICS OF ALL DATASETS.
+Dataset
+Variables
+Frequency
+Length
+Weather
+21
+10 min
+52696
+Electricity
+321
+1 hour
+26304
+Traffic
+862
+1 hour
+17544
+ETTh1
+7
+1 hour
+17420
+ETTh2
+7
+1 hour
+17420
+ETTm1
+7
+15 min
+69680
+ETTm2
+7
+15 min
+69680
+B. Multivariate Forecasting
+1) Setup: To evaluate the effectiveness of the proposed
+model structure, we follow iTransformer(Liu et al., 2024a)
+and conduct experiments of multivariate forecasting on the
+six benchmark datasets. The lengths of training, validation
+and test sets are recorded in table I. We set L = 96 and
+F = 96 and present the results of MSE and MAE in table II.
+Since we aim to directly predict multivariate series, we activate

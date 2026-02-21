@@ -1,0 +1,349 @@
+TIMEPERCEIVER: An Encoder-Decoder Framework
+for Generalized Time-Series Forecasting
+Jaebin Lee
+Sungkyunkwan University
+jaebin.lee@skku.edu
+Hankook Lee
+Sungkyunkwan University
+hankook.lee@skku.edu
+Abstract
+In machine learning, effective modeling requires a holistic consideration of how
+to encode inputs, make predictions (i.e., decoding), and train the model. How-
+ever, in time-series forecasting, prior work has predominantly focused on encoder
+design, often treating prediction and training as separate or secondary concerns.
+In this paper, we propose TIMEPERCEIVER, a unified encoder-decoder forecast-
+ing framework that is tightly aligned with an effective training strategy. To be
+specific, we first generalize the forecasting task to include diverse temporal pre-
+diction objectives such as extrapolation, interpolation, and imputation. Since this
+generalization requires handling input and target segments that are arbitrarily po-
+sitioned along the temporal axis, we design a novel encoder-decoder architecture
+that can flexibly perceive and adapt to these varying positions. For encoding,
+we introduce a set of latent bottleneck representations that can interact with all
+input segments to jointly capture temporal and cross-channel dependencies. For
+decoding, we leverage learnable queries corresponding to target timestamps to
+effectively retrieve relevant information. Extensive experiments demonstrate that
+our framework consistently and significantly outperforms prior state-of-the-art
+baselines across a wide range of benchmark datasets. The code is available at
+https://github.com/efficient-learning-lab/TimePerceiver.
+1
+Introduction
+Time-series forecasting is a fundamental task in machine learning, aiming to predict future events
+based on past observations. It is of practical importance, as it plays a crucial role in many real-world
+applications, including weather forecasting [1], electricity consumption forecasting [2], and traffic
+flow prediction [3]. Despite decades of rapid advances in machine learning, time-series forecasting
+remains a challenging problem due to complex temporal dependencies, non-linear patterns, domain
+variability, and other factors. In recent years, numerous deep learning approaches [4–18] have been
+proposed to improve forecasting accuracy, and it continues to be an active area of research.
+One promising and popular research direction is to design a new neural network architecture for
+time-series data, such as Transformers [4–9], convolutional neural networks (CNNs) [11, 12], multi-
+layer perceptrons (MLPs) [13–15], and state space models (SSMs) [17, 18]. These architectures
+primarily focus on capturing temporal and channel (i.e., variate) dependencies within input signals,
+and how to encode the input into a meaningful representation. The encoder architectures are often
+categorized into two groups: channel-independent encoders, which treat each variate separately
+and apply the same encoder across all variates, and channel-dependent encoders, which explicitly
+model interactions among variates. The channel-independent encoders are considered simple yet
+robust [19]; however, they fundamentally overlook cross-channel interactions, which can be critical
+for multivariate time-series forecasting. In contrast, the channel-dependent encoders [5, 6, 8] can
+inherently capture such cross-channel dependencies, but they often suffer from high computational
+39th Conference on Neural Information Processing Systems (NeurIPS 2025).
+arXiv:2512.22550v1  [cs.LG]  27 Dec 2025
+fω
+Xpast = [x1, x2, . . . , x6]
+ˆXfuture = [ˆx7, ˆx8, . . . , ˆx10]
+X = [x1, x2, . . . , x10]
+Input
+Target
+(a) Standard formulation
+gω
+XI = [x2, x3, x4, x5, x7, x8]
+ˆXJ = [ˆx1, ˆx6, ˆx9, ˆx10]
+I = {2, 3, 4, 5, 7, 8}
+J = {1, 6, 9, 10}
+X = [x1, x2, . . . , x10]
+Target
+Input
+(b) Generalized formulation (ours)
+Figure 1: (a) The standard time-series forecasting task aims to predict only the future values from
+past observations. In contrast, (b) our generalized task formulation aims to predict not only the future,
+but also the past and missing values based on arbitrary contextual information.
+cost and do not consistently yield significant improvements in forecasting accuracy over channel-
+independent baselines.
+While the encoder architecture is undoubtedly a core component of time-series forecasting models,
+it is equally important to consider (i) how to accurately predict (i.e., decode) future signals from
+the encoded representations of past signals, and (ii) how to effectively train the entire forecasting
+model. However, they often been studied independently, and little attention has been paid to how
+to effectively integrate them. For decoding, most prior works rely on a simple linear projection that
+directly predicts the future from the encoded representations. This design offers advantages in terms
+of simplicity and training efficiency, but may struggle to fully capture complex temporal structures.
+For training, inspired by BERT [20], masking-and-reconstruction tasks [4, 16] have been commonly
+adopted to pretrain encoders before supervised learning for time-series forecasting. In the pretraining
+stage, a subset of temporal segments from the time-series data is masked, and the encoder learns to
+reconstruct the masked portions. Despite its effectiveness, the self-supervised learning approach and
+the two-stage training (i.e., pretraining-finetuning) strategy remain questionable whether it is truly
+aligned with architectural designs (i.e., encoders and decoders) of time-series forecasting models.
+Contribution. In this paper, we propose TIMEPERCEIVER, a unified framework that tightly integrates
+an encoder-decoder architecture with an effective training strategy tailored for time-series forecasting.
+Our key idea is to generalize the standard forecasting task—formulated as predicting future values
+from a sequence of past observations—into a broader formulation that encompasses extrapolation,
+interpolation, and imputation tasks along the temporal axis (see Figure 1). In this setting, the model
+learns to predict not only future values, but also past and missing values based on arbitrary contextual
+information. This generalized formulation enables the model to jointly learn temporal structures and
+predictive behavior in a single end-to-end training process, thereby fostering a deeper understanding
+of temporal dynamics and eliminating the need for a separate pretraining-finetuning pipeline.
+To support our formulation, as illustrated in Figure 2, we design a novel attention-based encoder-
+decoder architecture that can flexibly handle arbitrary and potentially discontinuous temporal seg-
+ments unlike conventional models that operate on fixed-length lookback windows and predict fixed-
+length forecasting horizons. Specifically, our encoder utilizes the cross-attention mechanism (i) to
+encode an arbitrary set of temporal segments into a fixed-size set of latent bottleneck representations,
+and (ii) to contextualize each segment by leveraging the bottleneck representations. This bottleneck
+process enables the encoder to efficiently capture both temporal and cross-channel dependencies. To
+enhance the quality of the bottleneck representations, we also apply the self-attention mechanism
+within the bottleneck set. After encoding input segments, our decoder generates predictions via cross-
+attention between the representations of the input segments and learnable queries that correspond to
+target timestamps. This allows the decoder to selectively retrieve relevant information of the input
+and to produce temporally-aware outputs. This design is naturally aligned with our learning objective,
+which includes the forecasting task as part of a broader set of temporal prediction tasks.
+Through extensive experiments, our framework achieves state-of-the-art performance compared to
+recent baselines [4, 6–9, 11, 13, 14, 17] on standard benchmarks [1–3, 21, 22] (see Table 1). Notably,
+our model achieves 55 best and 17 second-best scores out of 80 settings, which are averaged over
+three different input lengths, demonstrating its strong overall performance. As a result, our framework
+records the best average rank with 1.375 in MSE and 1.550, indicating its consistent superiority
+2
+over the baselines. We also conduct ablation studies to verify the effectiveness of each component
+(Section 4.2) and analyze attention maps to gain insights into how the model operates (Section 4.3).
+Overall, our work emphasizes the importance of aligning architectural design with task formulation in
+time-series forecasting. We hope that this perspective encourages a shift from encoder-centric designs
+toward unified approaches more closely aligned with the core objectives of time-series forecasting.
+2
+Preliminaries
+2.1
+Problem Statement: Multivariate Time-Series Forecasting
+In this paper, we aim to solve the task of multivariate time-series forecasting, which requires to predict
+future values of multiple variables based on past observations. To formally define the task, let xt ∈RC
+denote a multivariate observation at time step t, where C is the number of variables (or channels).
+A multivariate time series of length T can be written as a sequence X = [x1, x2, . . . , xT ] ∈RC×T .
+Given a lookback window Xpast = [xt−L+1, . . . , xt] of length L, the goal of the task is to predict the
+future values Xfuture = [xt+1, . . . , xt+H] over a forecasting horizon of length H.
+Solving the task requires effectively capturing key characteristics of time-series data, such as tem-
+poral dependencies and cross-variable interactions. A common approach is to design a forecasting
+architecture fθ that can model such properties, and to train it using a simple objective such as mean
+squared error between the predicted and ground-truth future values as follows (see Figure 1a):
+L(θ; Xpast, Xfuture) =
+1
+HC
+H
+X
+h=1
+∥ˆxt+h −xt+h∥2
+2,
+ˆXfuture = [ˆxt+1, . . . , ˆxt+H] = fθ(Xpast).
+(1)
+This standard formulation, commonly used in many forecasting models and benchmarks [4, 6, 8, 22],
+assumes that both the lookback window and the forecasting horizon are of fixed length and continuous.
+2.2
+Attention Mechanism
+In this section, we formally describe the attention mechanism [23], which plays an important role in
+our TIMEPERCEIVER framework. It is designed to dynamically capture dependencies between input
+tokens by computing their contextual relevance through learned similarity scores. Specifically, given
+queries Q ∈RN×d, keys K ∈RM×d, and values V ∈RM×d, the attention output is computed as:
+Attention(Q, K, V) = Softmax
+QK⊤
+√
+d
+
+V.
+(2)
+This has recently become a standard architectural component across various domains, including
+including NLP [23], vision [24], tabular data [23], and time-series forecasting [4–7]. A common
+design for modular blocks combines attention with skip connections and feedforward networks
+(FFNs):
+H = U + Attention(U, Z, Z),
+(3)
+AttnBlock(U, Z) = H + FFN(H),
+(4)
+where U ∈RN×d and Z ∈RM×d denote input and context tokens, respectively. For simplicity, we
+omit learnable parameters, layer normalization [25], and multi-head attention [23]. When U = Z,
+the block corresponds to self-attention; otherwise, it performs cross-attention, allowing input tokens
+to attend to an external context.
+In the context of time-series forecasting, attention-based models adopt various tokenization strategies
+to capture temporal and multivariate patterns. A common approach is to divide the input time series
+into contiguous fixed-length temporal segments, or patches, and treat each patch as a token [4, 5].
+Alternatively, DeformableTST [7] selectively samples important time steps and treats them as tokens
+to capture temporal patterns, while iTransformer [6] represents the entire time series of each channel
+as a single token. In this work, we simply adopt the common approach.
+3
+Methodology
+In this work, we propose TIMEPERCEIVER, a unified encoder-decoder framework for generalized
+time-series forecasting. Our framework is based on a generalized formulation of the forecasting task
+3
+X
+Channels
+Time
+XI
+I
+w
+PuO82kxtSGwUj/zb4A=">AElHiclVPbatAEN3Yapu6N6eFvRF1LjkQ
+RhJ8RUaCIRCm4eSQp0YJGFW65UtsrqgHRUbsV/SL+tj/6RrxUlWtvuQBcGc
+MztzRjM7fspCDqb56BW1548fXb4vPHi5avXb5pHb694kmeEjknCkmziY05Z
+GNMxhMDoJM0ojnxGr/2b87X/+hfNeJjEP2GVUi/C8zgMQoJBUtOj2m83wrA
+gmBUXotG+B9/Ep1O3sI0To2v0jIExdIXrKv6L0m8ZfWNkWKZ7F+oHxUScOn
+f2UkwtQwG24bJZAlzlCsUngxfYCgecohpRcqpuJeizLtN9Xep0S5V6un7B
+IEuoQhyDO6V3Kwm2x4/0N7ZdSubPKnmEOZ/REt6pf1Ki0bico/juJykCr
+xaiDdqr6D+BEBV0V9FQwUMHQ09uVp/L4pzSXvVpQwNmy+yY5dF3DWtjtNDm
+XE6bf91ZQvKIxkAY5tyxzBS8AmcQEkZFw805TG5wXPqSDPGEeVeUW6R0Nu
+SmelBkskvBr1k1YgCR5yvIl/eXJfOt31rcp/PySEYekUYpznQmNwKBTnTId
+HXK6nPwowSYCtpYJKFsladLHCGCcjFraj4kZA9sbY7sGtc2R2r3+n96LbO7
+E13DtEH9BEdIwsN0Bn6i7RGJF6rX5ct+q29l7rJ1rX26v1g42Me9Q5Wjf
+/wF/nYSN</latexit>J
+Input Layer
+TPE + CPE
+Sequentialize
+TPE + CPE
+Sequentialize
+?
+?
+?
+?
+?
+?
+Query Tokens
+Input Tokens
+→K
+Self-Attention
+Block
+Cross-Attention
+Block
+Cross-Attention
+Block
+Cross-Attention
+Block
+Prediction
+ˆXJ
+Latent Tokens
+Encoding
+(§3.3)
+Decoding (§3.4)
+Arbitrary Patch Embedding (§3.2)
+TimePerceiver
+Parameterized Modules
+Patchify
+Random Split
+Figure 2: An overview of our TIMEPERCEIVER framework.
+(Section 3.1 and 3.2) and consists of two main components tailored to the formulation: an encoder
+that jointly captures complex temporal and channel dependencies (Section 3.3), and a decoder that
+selects queries corresponding to target segments and retrieves the relevant context (Section 3.4). Our
+overall framework is illustrated in Figure 2.
+3.1
+A Generalized Formulation of Time-series Forecasting
+While the formulation described in Section 2.1 explicitly follows the forecasting task definition, it
+inherently assumes a unidirectional temporal flow (i.e., from past to future), which may limit the
+ability to fully capture the underlying temporal dynamics. To address this limitation, we propose a
+generalized formulation that extends the forecasting task to allow flexible conditioning on arbitrary
+temporal segments, enabling the model to learn a more comprehensive understanding of the temporal
+dynamics. To define our generalized formulation, we begin by introducing a notation for a time series
+of arbitrary temporal segments. Given a multivariate time series X = [x1, x2, . . . , xT ] and a set of
+time indices I = {i1, i2, . . . , i|I|} ⊆{1, . . . , T}, we define the corresponding series XI as follows:
+XI := [xi : i ∈I] = [xi1, . . . , xi|I|] ∈RC×|I|.
+(5)
+Now, the generalized forecasting task can be defined by specifying a subset of time indices I as the
+input context and treating the remaining indices J = {1, . . . , T} \ I as prediction targets. In this
+task, a generalized forecasting model gθ is expected to operate on any choice of I and J , and to
+predict the values of the target indices as follows (see Figure 1b):
+ˆXJ = gθ(XI, I, J ).
+(6)
+The model is trained to minimize the mean squared error over the target indices J , formulated as:
+L(θ; X, I, J ) =
+1
+|J |C
+X
+j∈J
+∥ˆxj −xj∥2
+2 ,
+ˆXJ = [ˆxj : j ∈J ] = gθ(XI, I, J ).
+(7)
+This generalized formulation allows both the input and target time indices to be arbitrary and non-
+contiguous, thereby encompassing extrapolation, interpolation, and imputation tasks and capturing
+more complex temporal patterns. For example, the standard model fθ can be seen as its special case:
+fθ(Xpast) = gθ(Xpast, {t −L + 1, . . . , t}, {t + 1, . . . , t + H}).
+(8)
+3.2
+Constructing Arbitrary Patch Embeddings
+Leveraging patch-based representations has recently become an important design choice in time-series
+forecasting models [4] inspired by the success of the Vision Transformer [24]. Motivated by this
+trend, we extend our formulation in Section 3.1 to its patch-based version. To this end, given a
+multivariate time series X ∈RC×T , we first divide the time index set {1, 2, . . . , T} into N disjoint
+subsets P1, P2, . . . , PN where Pi = {(i −1)P + 1, . . . , iP} and P = T/N is the patch length.
+Here, we assume T is divisible by N for notational simplicity. This results in N fixed-length and non-
+overlapping patches along the temporal axis, denoted as XP1, . . . , XPN , where each patch is defined
+4
+as XPi = [xt ∈RC : t ∈Pi] ∈RC×P . For our task formulation, we consider an arbitrary set of
+patch indices Ipatch ⊂{1, 2, . . . , N} and define the remaining set as Jpatch = {1, . . . , N} \ Ipatch.
+This corresponds to selecting input and target time indices as I = S
+i∈Ipatch Pi and J = S
+j∈Jpatch Pj,
+respectively. Given the lookback window length L in the forecasting task, we set the number of
+selected input patches as |Ipatch| = L/P, i.e., |I| = L.
+To encode the structural information of patches XP1, . . . , XPN , we introduce two learnable positional
+embeddings: (i) temporal positional embedding (TPE), denoted as Etemporal ∈RN×D, which encodes
+the temporal location of each patch, and (ii) channel positional embedding (CPE), denoted as
+Echannel ∈RC×D, which represents the identity of each channel. Using these positional embeddings,
+we construct the input patch embedding H(0) and the query patch embedding Q(0) as follows:
+H(0)
+c,i = XPi,cWinput + Echannel
+c
++ Etemporal
+i
+∈RD,
+∀i ∈Ipatch, ∀c ∈{1, . . . , C},
+(9)
+Q(0)
+c,j = Echannel
+c
++ Etemporal
+j
+∈RD,
+∀j ∈Jpatch, ∀c ∈{1, . . . , C},
+(10)
+where XPi,c ∈RP denotes the raw values of the i-th patch for channel c, and Winput ∈RP ×D is a
+learnable input projection matrix. Note that H(0) and Q(0) are treated as sequences of embedding
+vectors in Section 3.3 and 3.4, i.e., H(0) ∈R(C|Ipatch|)×D and Q(0) ∈R(C|Jpatch|)×D.
+3.3
+Encoding with Latent Bottleneck
+Given the input patch embeddings H(0) constructed in Section 3.2, our encoder aims to efficiently
+capture both temporal and cross-channel dependencies within the embeddings for time-series fore-
+casting. To this end, we propose latent bottleneck, a two-stage mechanism in which input tokens are
+first compressed into a fixed number of latent tokens and then projected back to the input tokens. This
+design enables efficient and selective modeling of key dependencies while avoiding the computational
+overhead of full attention.
+We now formally describe our attention-based encoder based on the latent bottleneck mechanism.
+To this end, we introduce a set of learnable latent tokens Z(0) ∈RM×D where M is the number of
+latent tokens. Since these tokens can adaptively model key dependencies, M can be significantly
+smaller than the number of input tokens C|Ipatch|. Staring from Z(0), the latent bottleneck operates
+as follows:
+1. The latent tokens attend to the input to collect contextual information:
+Z(1) = AttnBlock(Z(0), H(0), H(0)) ∈RM×D.
+2. The latent tokens are refined via K self-attention layers:
+Z(k+1) = AttnBlock(Z(k), Z(k), Z(k)),
+∀k = 1, . . . , K.
+3. The updated latent tokens are used to update the input tokens:
+H(1) = AttnBlock(H(0), Z(K+1), Z(K+1)) ∈R(C|Ipatch|)×D.
+This design acts as an efficient attention bottleneck that significantly reduces computation from
+O(N 2) in full attention to O(NM) while selectively preserving informative patterns across both
+temporal and channel dimensions. We provide further ablation studies on the encoding mechanism
+and the latent bottleneck in Section 4.2 and Appendix G.
+3.4
+Decoding via Querying Target Patches
+Based on the query patch embeddings Q(0) described in Section 3.2 and the encoded input patch
+embeddings H(1) from Section 3.3, our decoder is designed to generate predictions ˆXPj for target
+patches Pj, where j ∈Jpatch. Note that Q(0) ∈R(C|Jpatch|)×D consists of C × |Jpatch| query tokens
+where each token Q(0)
+c,j = Echannel
+c
++ Etemporal
+j
+∈RD corresponds to the query vector for channel c and
+patch Pj, as defined in Section 3.2.
+To retrieve relevant information from the input for each query, we apply cross-attention using Q(0) as
+queries and H(1) as keys and values:
+Q(1) = AttnBlock(Q(0), H(1), H(1)) ∈R(C|Jpatch|)×D.
+5

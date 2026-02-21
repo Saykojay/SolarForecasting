@@ -14,9 +14,9 @@ data:
 features:
   corr_threshold: 0.15
   groups:
-    lags: false
+    lags: true
     physics: false
-    rolling: false
+    rolling: true
     time: false
     time_day: true
     time_doy: true
@@ -25,11 +25,14 @@ features:
     time_year: true
     weather: true
   manual_features:
-  - ghi_wm2
-  - pv_output_kw
+  - dhi_wm2
+  - dni_wm2
+  - hour_sin
+  - hour_cos
+  - ambient_temp_c
   multicol_threshold: 0.95
   scaler_type: minmax
-  selection_mode: auto
+  selection_mode: manual
   target_scaler_type: minmax
 forecasting:
   horizon: 24
@@ -37,12 +40,12 @@ mlflow:
   experiment_name: PatchTST_CSI_TransferLearning
   tracking_uri: mlruns
 model:
-  architecture: timeperceiver
+  architecture: lstm
   hyperparameters:
     batch_size: 32
-    d_model: 128
-    dropout: 0.1
-    learning_rate: 0.0005
+    d_model: 64
+    dropout: 0.2
+    learning_rate: 0.001
     lookback: 72
     n_latent_tokens: 32
     n_layers: 2
@@ -54,6 +57,7 @@ paths:
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
+  end_date: '2025-12-31'
   fix_ghi_dhi: true
   ghi_dark_pv_high: true
   ghi_high_pv_zero: true
@@ -61,8 +65,9 @@ preprocessing:
   productive_hours_threshold: 50
   remove_outliers: true
   resample_1h: true
-  subset_mode: baris
-  trim_rows: 20000
+  start_date: '2021-01-01'
+  subset_mode: tanggal
+  trim_rows: false
 pv_system:
   nameplate_capacity_kw: 15.93
   ref_temp: 25

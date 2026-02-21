@@ -627,8 +627,8 @@ def build_model(architecture: str, lookback: int, n_features: int,
     logger.info(f"Model '{arch}' dibangun: params={model.count_params():,}")
     return model
 
-def compile_model(model: tf.keras.Model, learning_rate: float):
-    model.compile(optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0), loss='mse')
+def compile_model(model: tf.keras.Model, learning_rate: float, loss_fn: str = 'mse'):
+    model.compile(optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0), loss=loss_fn)
     return model
 
 def get_custom_objects():

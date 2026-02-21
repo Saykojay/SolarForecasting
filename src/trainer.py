@@ -38,7 +38,7 @@ def _get_callbacks(cfg: dict):
 # ============================================================
 # STANDARD TRAINING
 # ============================================================
-def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, custom_model_id: str = None):
+def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, custom_model_id: str = None, loss_fn: str = 'mse'):
     """Melatih model dengan hyperparameters dari config."""
     from src.model_factory import build_model, compile_model
 
@@ -83,7 +83,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     n_features = data.get('n_features') or data['X_train'].shape[2]
     model = build_model(arch, lookback, n_features, horizon, hp)
-    compile_model(model, hp['learning_rate'])
+    compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
     model.summary()
 
     cbs = _get_callbacks(cfg)
@@ -174,7 +174,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 # ============================================================
 # OPTUNA HYPERPARAMETER TUNING
 # ============================================================
-def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False):
+def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
     import mlflow
@@ -278,7 +278,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                 hp['lookback'] = actual_lookback
                 model = build_model(arch, actual_lookback, n_features, horizon, hp)
 
-        compile_model(model, hp['learning_rate'])
+        compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
         early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
 
         history = model.fit(
