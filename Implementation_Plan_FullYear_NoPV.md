@@ -68,3 +68,28 @@
    - **MAE Score (Lower is Better):** Pastikan batangnya cukup memuaskan sesuai target error operasi pabrik listrik yang ditetapkan.
    - **Overfit Δ (Train R² - Test R²):** Pastikan tingginya mendekati angka `0`. Jika angka ini lebih dari `0.15` (misal 15% kesenjangan), ini menandakan model gagal beradaptasi ke data ujicoba (menghafal buta). Kembalilah ke Fase 3, tambahkan batas `Dropout`, lalu _Training_ ulang.
 5. Model yang lulus ujian ini berstatus **PRODUCTION READY** dan siap untuk dieksekusi di pabrik / *device* manapun yang hanya berbekal termometer dan sensor matahari!
+
+---
+
+## APPENDIX: Data Volume & Horizon Ablation Study (SOP Uji Rentang Data)
+**Target:** Mendesain eksperimen terstruktur untuk mencari tahu "Titik Jenuh" (Diminishing Returns) kuantitas data historis yang paling optimal untuk AI Pabrik Off-Grid, guna menghemat *Training Time* tanpa mengorbankan keamanan RMSE.
+
+### Tabel Rencana Eksperimen Rentang Data Training
+
+| Eksperimen ID | Kategori Uji Coba | Tanggal Mulai (Start) | Tanggal Akhir (End) | Durasi Data | Tujuan & Hipotesis yang Ingin Dibuktikan |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Vol-1** | Baseline Minimal | 1 Okt 2024 | 31 Des 2024 | **3 Bulan** | *Underfitting Check*: Membuktikan AI akan gagal (error besar) jika hanya dilatih dengan cuaca 1 musim saja. |
+| **Vol-2** | Setengah Siklus | 1 Jul 2024 | 31 Des 2024 | **6 Bulan** | Menilai apakah data setengah tahun cukup untuk menangani transisi cuaca kemarau ke hujan badai. |
+| **Vol-3** | Siklus Penuh | 1 Jan 2024 | 31 Des 2024 | **1 Tahun** | **(Standar Emas)** Membuktikan perbaikan signifikan saat AI melihat seluruh 365 hari (kemarau, equinox, monsoon). |
+| **Vol-4** | Siklus Ganda | 1 Jan 2023 | 31 Des 2024 | **2 Tahun** | Mencari "Titik Jenuh". Apakah menambah data 2x lipat menghasilkan akurasi (RMSE) yang sepadan dengan lama waktu *training*-nya? |
+| **Vol-5** | Maksimum Historis | 1 Jan 2020 | 31 Des 2024 | **5 Tahun** | Menguji ketahanan AI terhadap iklim ekstrem (El Nino/La Nina) jangka panjang, namun rentan pada bias masa lalu. |
+| **Era-1** | Uji Degradasi Umur | 1 Jan 2021 | 31 Des 2021 | **1 Tahun (Lama)** | Membuktikan bahwa cuaca bumi berubah (Concept Drift). Model ini diprediksi kalah akurat dibanding **Vol-3** saat diuji hari ini. |
+
+### Cara Mengesekusi SOP Uji Rentang Data di Dashboard UI
+1. Buka Tab **Data Preparation**.
+2. Centang opsi **Limit Dataset (Subset)** (di kolom tengah) dan pilih metodenya: **"Rentang Tanggal (Date Range)"**.
+3. Masukkan kombinasi *Start Date* dan *End Date* dari tabel di atas satu per satu (Misal: `01-10-2024` s/d `31-12-2024` untuk Vol-1).
+4. Klik **Start Preprocessing**, lalu beri nama paket datanya (Misal: `Data_Vol1_3Bulan`).
+5. Latih model satu per satu di tab **Training Center** menggunakan paket data masing-masing.
+6. Arahkan ke tab **Comparison**, pilih keenam model (Vol-1 hingga Vol-5 + Era-1), lalu klik **Run Comparison Analysis**.
+7. **Analisis Kurva U:** Perhatikan grafik balok **RMSE (Lower is Safer)**. Cari di *checkpoint* data mana baris batang RMSE tersebut paling landai sebelum akhirnya stagnan atau kembali meninggi. Itulah volume data historis paling sempurna untuk dibeli oleh pabrik pembangkit Anda!
