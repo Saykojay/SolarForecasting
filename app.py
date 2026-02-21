@@ -14,6 +14,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 from src.lang import gt
+from src.model_factory import get_custom_objects, compile_model
+from src.predictor import evaluate_model
+import gc
 
 # Ensure src/ is importable
 sys.path.insert(0, os.path.dirname(__file__))
@@ -32,19 +35,25 @@ os.environ['GIT_PYTHON_REFRESH'] = 'quiet'
 # GPU CONFIGURATION
 # ============================================================
 import tensorflow as tf
-try:
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        gpus_info = f"✅ Running in GPU Mode. Available GPUs: {len(gpus)}"
-    else:
-        gpus_info = "💡 Running in CPU Mode. No GPU detected or GPU disabled."
-    
-    time_str = datetime.now().strftime("%H:%M:%S")
-    print(f"[{time_str}] PID:{os.getpid()} {gpus_info}")
-except Exception as e:
-    print(f"Error initializing GPU: {e}")
+
+@st.cache_resource
+def get_gpu_info():
+    try:
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            info = f"✅ Running in GPU Mode. Available GPUs: {len(gpus)}"
+        else:
+            info = "💡 Running in CPU Mode. No GPU detected or GPU disabled."
+        
+        time_str = datetime.now().strftime("%H:%M:%S")
+        print(f"[{time_str}] PID:{os.getpid()} {info}")
+        return info
+    except Exception as e:
+        return f"Error initializing GPU: {e}"
+
+gpus_info = get_gpu_info()
 
 # ============================================================
 # PAGE CONFIG
@@ -230,6 +239,18 @@ def load_feature_preset(name):
 def _persist_path(name):
     os.makedirs(PERSIST_DIR, exist_ok=True)
     return os.path.join(PERSIST_DIR, name)
+
+@st.cache_data(ttl=60) # Cache for 60s to avoid heavy disk I/O on every rerun
+def label_format_with_time(name, base_path):
+    """Format string for selectbox to show name (timestamp)."""
+    if name in ["Latest (Default)", "Aktif (Dinamis)", "-- Silakan Pilih --", "Current (Dynamic)", "Current / Last Run"]:
+         return name
+    full_path = os.path.join(base_path, name)
+    if os.path.exists(full_path):
+        mtime = os.path.getmtime(full_path)
+        dt = datetime.fromtimestamp(mtime).strftime('%d/%m %H:%M')
+        return f"{name} ({dt})"
+    return name
 
 def save_training_history(history_dict, model_name=None):
     """Save training history to disk so it survives refresh."""
@@ -478,7 +499,8 @@ with st.sidebar:
             if st.session_state.get('selected_model') in model_options:
                 curr_idx = model_options.index(st.session_state.selected_model)
             
-            selected = st.selectbox("Pilih Model untuk Evaluasi", model_options, index=curr_idx)
+            selected = st.selectbox("Pilih Model untuk Evaluasi", model_options, index=curr_idx,
+                                   format_func=lambda x: label_format_with_time(x, model_dir))
             st.session_state.selected_model = selected
             st.caption(f"Aktif: `{selected}`")
         else:
@@ -645,22 +667,42 @@ with tab_prep_features:
     with st.expander("⚙️ Konfigurasi Preprocessing & Features", expanded=not has_data):
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("##### 📦 Feature Groups")
+            # --- CLEAR SEPARATION: TARGET SELECTION ---
+            st.markdown("##### 🎯 1. Variabel Target (Yang Ingin Diprediksi)")
+            st.info("Pilih apa yang menjadi Final Output (Y) hasil ramalan AI kita di hari esok.")
+            use_csi = st.checkbox("Prediksi Rasio Cuaca Bersih (CSI Normalization)", 
+                                   value=cfg['target'].get('use_csi', True),
+                                   help="True: AI memprediksi CSI (Rasio radiasi tembus). False: AI memprediksi Daya (kW) secara langsung.",
+                                   key="p_csi")
+            cfg['target']['use_csi'] = use_csi
+            if use_csi:
+                cfg['target']['csi_ghi_threshold'] = st.number_input(
+                    "GHI Threshold (W/m²)", 
+                    value=cfg['target'].get('csi_ghi_threshold', 50),
+                    min_value=0, max_value=500, key="p_csi_th"
+                )
+
+            st.markdown("---")
+            # --- CLEAR SEPARATION: INPUT FEATURES ---
+            st.markdown("##### 📦 2. Fitur Input Historis (Data Masa Lalu)")
+            st.caption("Pilih metrik sejarah (X) apa saja yang digunakan AI untuk *meramal* target di atas.")
             g = cfg['features'].get('groups', {})
             # time features
             with st.expander("🕒 Cyclical Time Features (Sin/Cos)", expanded=False):
                 g['time_hour'] = st.checkbox("Hourly (Hour Sin/Cos)", value=g.get('time_hour', True), 
                                             help="Menangkap pola harian (pagi-siang-malam).", key="p_time_h")
+                g['time_day'] = st.checkbox("Daily (Day of Month Sin/Cos)", value=g.get('time_day', True), 
+                                             help="Menangkap pola tanggal dalam suatu bulan.", key="p_time_day")
                 g['time_month'] = st.checkbox("Monthly (Month Sin/Cos)", value=g.get('time_month', True), 
                                              help="Menangkap pola musiman bulanan.", key="p_time_m")
                 g['time_doy'] = st.checkbox("Seasonal (DOY Sin/Cos)", value=g.get('time_doy', True), 
                                            help="Day of Year: Resolusi tinggi untuk dinamika musiman.", key="p_time_d")
                 g['time_year'] = st.checkbox("Yearly (Linear)", value=g.get('time_year', False), 
                                             help="Menangkap tren jangka panjang/tahunan.", key="p_time_y")
-            g['weather'] = st.checkbox("Weather (Raw)", value=g.get('weather', True), key="p_weather")
-            g['lags'] = st.checkbox("Time Lags (History)", value=g.get('lags', True), key="p_lags")
+            g['weather'] = st.checkbox("Weather (Suhu, GHI, dll)", value=g.get('weather', True), key="p_weather")
+            g['lags'] = st.checkbox("Time Lags (Riwayat Waktu Mundur)", value=g.get('lags', True), key="p_lags")
             g['rolling'] = st.checkbox("Moving Average", value=g.get('rolling', True), key="p_roll")
-            g['physics'] = st.checkbox("Physics-based (CSI)", value=g.get('physics', True), key="p_phys")
+            g['physics'] = st.checkbox("Physics-based (Memasukkan target sebagai input riwayat)", value=g.get('physics', True), key="p_phys")
             cfg['features']['groups'] = g
             
             st.markdown("---")
@@ -721,11 +763,10 @@ with tab_prep_features:
                     valid_defaults = [f for f in current_manual if f in all_available]
                     
                     selected_manual = st.multiselect(
-                        "Pilih Fitur Input:",
+                        "Pilih Fitur Input Historis (X):",
                         options=all_available,
                         default=valid_defaults,
-                        help="Pilih fitur yang ingin dijadikan input model. "
-                             "Tip: Jalankan preprocessing Auto dulu untuk melihat semua fitur terekayasa yang tersedia.",
+                        help="PERHATIAN: Ini BUKAN target. Jika Anda mencentang 'csi_target' di sini, model akan melihat sejarah 'csi_target' 72 jam ke belakang untuk meramal masa depan.",
                         key="p_manual_feats"
                     )
                     cfg['features']['manual_features'] = selected_manual
@@ -775,18 +816,7 @@ with tab_prep_features:
                 cfg['features']['scaler_type'] = selected_scaler
 
             st.markdown("---")
-            st.markdown("##### 🎯 Target Transform")
-            use_csi = st.checkbox("Gunakan CSI Normalization", 
-                                   value=cfg['target'].get('use_csi', True),
-                                   help="True: Prediksi rasio (CSI), False: Prediksi daya langsung (kW)",
-                                   key="p_csi")
-            cfg['target']['use_csi'] = use_csi
-            if use_csi:
-                cfg['target']['csi_ghi_threshold'] = st.number_input(
-                    "GHI Threshold (W/m²)", 
-                    value=cfg['target'].get('csi_ghi_threshold', 50),
-                    min_value=0, max_value=500, key="p_csi_th"
-                )
+            # Target transform moved to the top of c1
 
         with c2:
             st.markdown("##### 🧹 Cleaning (Algorithm 1)")
@@ -817,19 +847,52 @@ with tab_prep_features:
             pcfg['impute_missing_pv'] = st.checkbox("Impute Missing PV (CSI-based)", value=pcfg.get('impute_missing_pv', False), key="p_imp")
             
             st.markdown("---")
-            st.markdown("##### ✂️ Row Trimming")
-            do_trim = st.checkbox("Batasi Jumlah Data (Limit Rows)", 
-                                 value=bool(pcfg.get('trim_rows')), 
-                                 help="Gunakan ini untuk mencoba subset data kecil (misal: 5000 baris pertama) demi kecepatan.",
-                                 key="p_trim_bool")
-            if do_trim:
-                pcfg['trim_rows'] = st.number_input("Jumlah Baris:", 
+            st.markdown("##### ✂️ Limit Dataset (Subset)")
+            subset_mode = pcfg.get('subset_mode', 'semua_data' if not pcfg.get('trim_rows') else 'baris')
+            
+            smode_list = ["Semua Data", "Batasi Jumlah Baris", "Rentang Tanggal (Date Range)"]
+            smode_idx = 0
+            if subset_mode == 'baris': smode_idx = 1
+            elif subset_mode == 'tanggal': smode_idx = 2
+            
+            sel_smode = st.radio("Metode Pemotongan Data:", smode_list, index=smode_idx, key="p_smode_radio")
+            
+            if sel_smode == "Semua Data":
+                pcfg['subset_mode'] = 'semua_data'
+                pcfg['trim_rows'] = False
+            elif sel_smode == "Batasi Jumlah Baris":
+                pcfg['subset_mode'] = 'baris'
+                pcfg['trim_rows'] = st.number_input("Ambil X Baris Pertama:", 
                                                    min_value=100, 
                                                    value=int(pcfg.get('trim_rows', 5000)) if pcfg.get('trim_rows') else 5000,
                                                    step=1000,
                                                    key="p_trim_val")
-            else:
+            elif sel_smode == "Rentang Tanggal (Date Range)":
+                pcfg['subset_mode'] = 'tanggal'
                 pcfg['trim_rows'] = False
+                
+                # Default dates fallback
+                default_start = datetime(2021, 1, 1).date()
+                default_end = datetime(2021, 12, 31).date()
+                
+                st.caption("Pilih rentang tanggal dataset yang ingin dipakai.")
+                c_d1, c_d2 = st.columns(2)
+                
+                with c_d1:
+                    curr_start = pcfg.get('start_date', default_start)
+                    if isinstance(curr_start, str):
+                        try: curr_start = datetime.strptime(curr_start, "%Y-%m-%d").date()
+                        except: curr_start = default_start
+                    d_start = st.date_input("Mulai:", value=curr_start, key="p_dstart")
+                    pcfg['start_date'] = str(d_start)
+                    
+                with c_d2:
+                    curr_end = pcfg.get('end_date', default_end)
+                    if isinstance(curr_end, str):
+                        try: curr_end = datetime.strptime(curr_end, "%Y-%m-%d").date()
+                        except: curr_end = default_end
+                    d_end = st.date_input("Sampai:", value=curr_end, key="p_dend")
+                    pcfg['end_date'] = str(d_end)
 
             cfg['preprocessing'] = pcfg
 
@@ -1264,6 +1327,69 @@ with tab_data:
 
         st.markdown("---")
         
+        # --- PHASE 2b: ROLLING CORRELATION ANALYSIS ---
+        st.markdown("#### ⏳ Rolling Correlation Analysis")
+        st.caption("Lihat bagaimana nilai korelasi antara fitur target dan fitur lainnya berubah seiring baris data (waktu).")
+        
+        target_candidates = ['csi_target', 'pv_cs_normalized', 'pv_output_kw', cfg['data']['target_col']]
+        target_col_opts = [c for c in all_f if c in target_candidates]
+        if not target_col_opts:
+            target_col_opts = [all_f[-1]]
+            
+        c_r1, c_r2, c_r3 = st.columns([1, 2, 1])
+        with c_r1:
+            roll_target = st.selectbox("Fitur Target (Y):", all_f, index=all_f.index(target_col_opts[0]), key="roll_target")
+        with c_r2:
+            default_feats = [f for f in sel_f if f != roll_target][:3]
+            if not default_feats:
+                default_feats = [f for f in all_f if f != roll_target][:3]
+            roll_features = st.multiselect("Bandingkan Korelasi dengan (X):", [f for f in all_f if f != roll_target], default=default_feats, key="roll_features")
+        with c_r3:
+            roll_window = st.number_input("Rolling Window Size", min_value=24, max_value=5000, value=720, step=24, help="Jumlah baris data (misal 720 jam = 30 hari) untuk 1 nilai korelasi.", key="roll_window")
+            
+        if roll_features:
+            train_feats_path = os.path.join(cfg['paths']['processed_dir'], 'df_train_feats.pkl')
+            if os.path.exists(train_feats_path):
+                if st.button("📊 Generate Rolling Correlation Chart", type="primary"):
+                    with st.spinner("Menghitung rolling correlation sepanjang waktu..."):
+                        import numpy as np
+                        df_roll = pd.read_pickle(train_feats_path)
+                        
+                        fig_rc = go.Figure()
+                        x_axis = np.arange(len(df_roll))
+                        for f in roll_features:
+                            # Hitung korelasi
+                            rolling_corr = df_roll[roll_target].rolling(window=roll_window).corr(df_roll[f])
+                            fig_rc.add_trace(go.Scatter(
+                                x=x_axis, 
+                                y=rolling_corr, 
+                                mode='lines', 
+                                name=f"{f} vs {roll_target}",
+                                line=dict(width=2)
+                            ))
+                            
+                        # Add zero line
+                        fig_rc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+                            
+                        fig_rc.update_layout(
+                            template="plotly_dark",
+                            title=f"Perubahan Dinamis Korelasi (Window={roll_window} baris)",
+                            xaxis_title="Indeks Baris Data (Waktu)",
+                            yaxis_title="Nilai Korelasi (Pearson)",
+                            yaxis=dict(range=[-1.05, 1.05]),
+                            height=400,
+                            margin=dict(t=50, b=20, l=20, r=20),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=""),
+                            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                        )
+                        st.plotly_chart(fig_rc, width="stretch")
+            else:
+                st.warning("File `df_train_feats.pkl` tidak ditemukan di folder processed. Jalankan ulang preprocessing.")
+        else:
+            st.info("Pilih minimal 1 fitur untuk dibandingkan.")
+            
+        st.markdown("---")
+        
         # --- PHASE 3: DATA SPLITTING & SEQUENCING ---
         st.markdown("#### ✂️ Phase 3: Dataset Splitting & Scaling")
         
@@ -1320,7 +1446,8 @@ with tab_train:
             
             # Select the most recent version if it was just created
             default_idx = 0
-            selected_v = st.selectbox("Gunakan Versi Data untuk Training:", options, index=default_idx, key="data_version_train")
+            selected_v = st.selectbox("Gunakan Versi Data untuk Training:", options, index=default_idx, key="data_version_train",
+                                   format_func=lambda x: label_format_with_time(x, proc_dir))
             
             if st.button("🔄 Refresh Daftar Versi"):
                 st.rerun()
@@ -1397,19 +1524,73 @@ with tab_train:
         hp = cfg['model']['hyperparameters']
         arch = cfg['model'].get('architecture', 'patchtst').lower()
         
+        def _update_architecture():
+            new_a = st.session_state.arch_selector_train
+            cfg['model']['architecture'] = new_a
+            # Auto-update hyperparameters to defaults for the new architecture
+            if new_a == 'patchtst':
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
+                    'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 
+                    'stride': 8, 'n_heads': 16
+                })
+            elif new_a == 'timetracker':
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 64, 'n_layers': 2, 'learning_rate': 0.0005, 
+                    'batch_size': 32, 'dropout': 0.1, 'patch_len': 16, 
+                    'stride': 8, 'n_heads': 8, 'n_shared_experts': 1, 
+                    'n_private_experts': 4, 'top_k': 2
+                })
+            elif new_a == 'timeperceiver':
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 2, 'learning_rate': 0.0005, 
+                    'batch_size': 32, 'dropout': 0.1, 'patch_len': 16, 
+                    'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32
+                })
+            else: # gru, lstm, rnn
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
+                    'batch_size': 32, 'dropout': 0.2, 'use_bidirectional': True
+                })
+            
+            # C-Delete keys that are no longer relevant to avoid config pollution
+            if new_a != 'patchtst':
+                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim']:
+                    cfg['model']['hyperparameters'].pop(k, None)
+            else:
+                cfg['model']['hyperparameters'].pop('use_bidirectional', None)
+            
+            save_config_to_file(cfg)
+            st.session_state.cfg = cfg
+            st.session_state.tune_arch_selector = new_a
+
         with col_hp1:
             st.markdown("**Core Structure**")
-            new_arch = st.selectbox("Arsitektur Model", ["patchtst", "gru", "lstm", "rnn"], 
-                                    index=["patchtst", "gru", "lstm", "rnn"].index(arch))
-            cfg['model']['architecture'] = new_arch
+            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
+                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(arch),
+                                  key="arch_selector_train",
+                                  on_change=_update_architecture)
+            
+            # Rebind new_arch precisely to the confirmed architecture
+            new_arch = cfg['model']['architecture']
             
             hp['lookback'] = st.select_slider("Lookback Window (h)", 
                                               options=[24, 48, 72, 96, 120, 144, 168, 192, 240, 336],
                                               value=hp.get('lookback', 72))
             
             # Adaptive Labels for Core Structure
-            d_label = "d_model (Embedding Dimension)" if new_arch == "patchtst" else "Hidden Units (RNN Dimension)"
-            l_label = "Transformer Blocks" if new_arch == "patchtst" else "Stacked RNN Layers"
+            if new_arch == "patchtst":
+                d_label = "d_model (Embedding Dimension)"
+                l_label = "Transformer Blocks"
+            elif new_arch == "timetracker":
+                d_label = "d_model (Token Dimension)"
+                l_label = "MoE Transformer Layers"
+            elif new_arch == "timeperceiver":
+                d_label = "d_model (Patch Embedding)"
+                l_label = "Latent Self-Attention Layers (K)"
+            else:
+                d_label = f"Hidden Units ({new_arch.upper()} Dimension)"
+                l_label = f"Stacked {new_arch.upper()} Layers"
             
             _d_model_opts = sorted(set([16, 32, 64, 128, 256, 512] + [hp.get('d_model', 128)]))
             hp['d_model'] = st.selectbox(d_label, _d_model_opts, 
@@ -1434,6 +1615,26 @@ with tab_train:
                     hp['ff_dim'] = st.number_input("ff_dim (F)", value=hp.get('ff_dim', hp['d_model'] * 2), min_value=32, step=32)
                     _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 16)]))
                     hp['n_heads'] = st.selectbox("n_heads (H)", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 16)))
+            
+            elif new_arch == "timetracker":
+                with st.expander("⏱️ TimeTracker Specific Params", expanded=True):
+                    hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
+                    hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
+                    _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 8)]))
+                    hp['n_heads'] = st.selectbox("n_heads (H) - Any-variate Rel", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 8)))
+                    st.markdown("**Mixture of Experts Setup**")
+                    c_e1, c_e2 = st.columns(2)
+                    hp['n_shared_experts'] = c_e1.number_input("Shared Experts", value=hp.get('n_shared_experts', 1), min_value=0, max_value=8)
+                    hp['n_private_experts'] = c_e2.number_input("Private Experts", value=hp.get('n_private_experts', 4), min_value=1, max_value=32)
+                    hp['top_k'] = st.number_input("Top-K Routing", value=hp.get('top_k', 2), min_value=1, max_value=hp['n_private_experts'], help="Berapa expert private yang aktif untuk setiap token")
+
+            elif new_arch == "timeperceiver":
+                with st.expander("👁️ TimePerceiver Specific Params", expanded=True):
+                    hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
+                    hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
+                    _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 8)]))
+                    hp['n_heads'] = st.selectbox("n_heads (H) - Bottleneck", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 8)))
+                    hp['n_latent_tokens'] = st.number_input("Latent Tokens (M)", value=hp.get('n_latent_tokens', 32), min_value=4, max_value=256, step=4, help="Ukuran bottleneck (M) untuk attention laten")
             
             elif new_arch in ["gru", "lstm", "rnn"]:
                 with st.expander(f"🔄 {new_arch.upper()} Specific Params", expanded=True):
@@ -1610,45 +1811,102 @@ with tab_batch:
         
         with col_bq1:
             st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
-            q_arch = st.selectbox(gt('architecture', st.session_state.lang), ["patchtst", "gru", "lstm", "rnn"], key="q_arch")
-            q_name = st.text_input(gt('exp_name', st.session_state.lang), value=f"Exp_{q_arch}_{len(st.session_state.batch_queue)+1}")
+            
+            # 1. Architecture Selection
+            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+            
+            # Default to global active architecture if not set
+            if 'batch_arch_selector' not in st.session_state:
+                st.session_state.batch_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
+                
+            q_arch_val = st.selectbox(gt('architecture', st.session_state.lang), 
+                                     arch_list, 
+                                     key="batch_arch_selector")
+            
+            q_name = st.text_input(gt('exp_name', st.session_state.lang), 
+                                  value=f"Exp_{q_arch_val}_{len(st.session_state.batch_queue)+1}",
+                                  key=f"batch_exp_name_{q_arch_val}")
             
             with st.expander(gt('config_hp', st.session_state.lang), expanded=True):
-                q_hp = cfg['model']['hyperparameters'].copy()
+                # Start with a fresh set of defaults for the selected architecture
+                # instead of blindly copying from the global active model
+                q_hp = {}
                 
-                # --- Architecture Specific Labels ---
-                d_label = "d_model (Embedding)" if q_arch == "patchtst" else "Hidden Units"
-                l_label = "Transformer Blocks" if q_arch == "patchtst" else "Stacked RNN Layers"
+                # Base defaults
+                base_defaults = {
+                    'lookback': 72, 'learning_rate': 0.0001, 'batch_size': 32, 'dropout': 0.2, 'd_model': 64, 'n_layers': 2
+                }
+                
+                if q_arch_val == 'patchtst':
+                    q_hp.update(base_defaults)
+                    q_hp.update({'d_model': 128, 'n_layers': 3, 'patch_len': 16, 'stride': 8, 'n_heads': 16, 'ff_dim': 256})
+                    d_label, l_label = "d_model (Embedding)", "Transformer Blocks"
+                elif q_arch_val == 'timetracker':
+                    q_hp.update(base_defaults)
+                    q_hp.update({'d_model': 64, 'n_layers': 2, 'patch_len': 16, 'stride': 8, 'n_heads': 8, 'n_shared_experts': 1, 'n_private_experts': 4, 'top_k': 2})
+                    d_label, l_label = "d_model (Token Dim)", "MoE Layers"
+                elif q_arch_val == 'timeperceiver':
+                    q_hp.update(base_defaults)
+                    q_hp.update({'d_model': 128, 'n_layers': 2, 'patch_len': 16, 'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32})
+                    d_label, l_label = "d_model (Patch Embed)", "Latent Attention Layers"
+                else: # gru, lstm, rnn
+                    q_hp.update(base_defaults)
+                    q_hp.update({'learning_rate': 0.001, 'use_bidirectional': True})
+                    d_label, l_label = f"Hidden Units ({q_arch_val.upper()})", f"Stacked {q_arch_val.upper()} Layers"
                 
                 cq1, cq2 = st.columns(2)
                 with cq1:
-                    q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key="q_lb")
+                    q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key=f"q_lb_{q_arch_val}")
                     
                     _d_opts = [16, 32, 64, 128, 256, 512]
-                    q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key="q_dm")
-                    q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key="q_nl")
+                    q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key=f"q_dm_{q_arch_val}")
+                    q_hp['n_layers'] = st.number_input(l_label, 1, 12, q_hp.get('n_layers', 3), key=f"q_nl_{q_arch_val}")
                     
                 with cq2:
-                    q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key="q_lr")
+                    q_hp['learning_rate'] = st.number_input("Learning Rate", 0.00001, 0.01, q_hp.get('learning_rate', 0.0001), format="%.5f", key=f"q_lr_{q_arch_val}")
                     _bs_opts = [16, 32, 64, 128]
-                    q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key="q_bs")
-                    q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key="q_dr")
+                    q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key=f"q_bs_{q_arch_val}")
+                    q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key=f"q_dr_{q_arch_val}")
 
                 # --- SPECIFIC PARAMS ---
-                if q_arch == "patchtst":
+                if q_arch_val == "patchtst":
                     st.markdown("---")
                     sq1, sq2 = st.columns(2)
                     with sq1:
                         q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl")
                         q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st")
                     with sq2:
-                        q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp['d_model']*2), 32, key="q_ff")
+                        q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp.get('d_model', 128)*2), 32, key="q_ff")
                         _h_opts = [1, 2, 4, 8, 12, 16]
                         q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key="q_nh")
                 
-                elif q_arch in ["gru", "lstm", "rnn"]:
+                elif q_arch_val == "timetracker":
                     st.markdown("---")
-                    q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch}")
+                    sq1, sq2 = st.columns(2)
+                    with sq1:
+                        q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl_tt")
+                        q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st_tt")
+                        _h_opts = [1, 2, 4, 8, 12, 16]
+                        q_hp['n_heads'] = st.selectbox("n_heads (H)", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 8)) if q_hp.get('n_heads', 8) in _h_opts else 3, key="q_nh_tt")
+                    with sq2:
+                        q_hp['n_shared_experts'] = st.number_input("Shared Experts", 0, 8, q_hp.get('n_shared_experts', 1), key="q_se_tt")
+                        q_hp['n_private_experts'] = st.number_input("Private Experts", 1, 32, q_hp.get('n_private_experts', 4), key="q_pe_tt")
+                        q_hp['top_k'] = st.number_input("Top-K Routing", 1, 32, q_hp.get('top_k', 2), key="q_tk_tt")
+
+                elif q_arch_val == "timeperceiver":
+                    st.markdown("---")
+                    sq1, sq2 = st.columns(2)
+                    with sq1:
+                        q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl_tp")
+                        q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st_tp")
+                    with sq2:
+                        _h_opts = [1, 2, 4, 8, 12, 16]
+                        q_hp['n_heads'] = st.selectbox("n_heads (H)", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 8)) if q_hp.get('n_heads', 8) in _h_opts else 3, key="q_nh_tp")
+                        q_hp['n_latent_tokens'] = st.number_input("Latent Tokens (M)", 4, 256, q_hp.get('n_latent_tokens', 32), 4, key="q_lt_tp")
+                
+                elif q_arch_val in ["gru", "lstm", "rnn"]:
+                    st.markdown("---")
+                    q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch_val}")
             
             with st.expander(gt('config_data_feat', st.session_state.lang), expanded=False):
                 st.caption("Pilih versi data atau konfigurasi fitur")
@@ -1660,7 +1918,8 @@ with tab_batch:
                     dirs = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
                     proc_versions.extend(sorted(dirs, reverse=True))
                 
-                q_data_v = st.selectbox(gt('data_version_select', st.session_state.lang), proc_versions, key="q_data_v")
+                q_data_v = st.selectbox(gt('data_version_select', st.session_state.lang), proc_versions, key="q_data_v",
+                                      format_func=lambda x: label_format_with_time(x, proc_dir))
                 
                 st.markdown("---")
                 st.caption(gt('feature_groups_info', st.session_state.lang))
@@ -1674,7 +1933,7 @@ with tab_batch:
             if st.button(gt('add_to_queue', st.session_state.lang), width="stretch", key="btn_add_batch_queue", disabled=st.session_state.batch_running):
                 st.session_state.batch_queue.append({
                     "name": q_name,
-                    "architecture": q_arch,
+                    "architecture": q_arch_val,
                     "hp": q_hp,
                     "data_version": q_data_v,
                     "features": {
@@ -1683,7 +1942,7 @@ with tab_batch:
                     }
                 })
                 # Log to CMD for debugging
-                print(f"➕ [{datetime.now().strftime('%H:%M:%S')}] Queued: {q_name} ({q_arch})")
+                print(f"➕ [{datetime.now().strftime('%H:%M:%S')}] Queued: {q_name} ({q_arch_val})")
                 import sys
                 sys.stdout.flush()
                 
@@ -1859,10 +2118,34 @@ with tab_tuning:
         st.markdown("#### 🚀 Konfigurasi & Jalankan Tuning")
         
         # Add model selector specifically for tuning context
-        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "gru", "lstm", "rnn"], 
-                              index=["patchtst", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
-                              key="tune_arch_selector")
-        cfg['model']['architecture'] = t_arch # Sync with config
+        def _update_tuning_architecture():
+            new_a = st.session_state.tune_arch_selector
+            cfg['model']['architecture'] = new_a
+            if new_a == 'patchtst':
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
+                    'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
+                })
+            else:
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
+                    'batch_size': 32, 'dropout': 0.2, 'use_bidirectional': True
+                })
+            if new_a != 'patchtst':
+                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim']: cfg['model']['hyperparameters'].pop(k, None)
+            else:
+                cfg['model']['hyperparameters'].pop('use_bidirectional', None)
+            save_config_to_file(cfg)
+            st.session_state.cfg = cfg
+            st.session_state.arch_selector_train = new_a
+
+        if 'tune_arch_selector' not in st.session_state:
+            st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
+
+        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
+                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
+                              key="tune_arch_selector",
+                              on_change=_update_tuning_architecture)
         
         with st.expander("🛠️ Edit Search Space Hyperparameters", expanded=False):
             st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
@@ -1885,14 +2168,14 @@ with tab_tuning:
                     s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key="s_step_new")
                     space['stride'] = [s_min, s_max, s_step]
                 else:
-                    st.markdown("**1. RNN Configuration**")
+                    st.markdown(f"**1. {t_arch.upper()} Configuration**")
                     st.info("Parameter patching tidak tersedia untuk arsitektur GRU.")
                     # Ensure they aren't in space to avoid confusion (optional)
 
             with col_s2:
                 # Dynamic Search Space Labels
-                ss_d_label = "D_Model (Embedding)" if cfg['model']['architecture'] == 'patchtst' else "Hidden Units (Capacity)"
-                ss_l_label = "Layers (Transformer)" if cfg['model']['architecture'] == 'patchtst' else "Layers (Stacked RNN)"
+                ss_d_label = "D_Model (Embedding)" if cfg['model']['architecture'] == 'patchtst' else f"Hidden Units ({cfg['model']['architecture'].upper()} Capacity)"
+                ss_l_label = "Layers (Transformer)" if cfg['model']['architecture'] == 'patchtst' else f"Layers (Stacked {cfg['model']['architecture'].upper()})"
                 
                 st.markdown(f"**2. {cfg['model']['architecture'].upper()} Capacity**")
                 d_vals = space.get('d_model', [64, 256])
@@ -2240,7 +2523,8 @@ with tab_eval:
                 current_sel = st.session_state.get('selected_model', all_models[0])
                 model_to_eval = st.selectbox("Pilih Model untuk Evaluasi (Tab):", all_models, 
                                            index=all_models.index(current_sel) if current_sel in all_models else 0,
-                                           key="sel_eval_tab")
+                                           key="sel_eval_tab",
+                                           format_func=lambda x: label_format_with_time(x, model_dir))
                 st.session_state.selected_model = model_to_eval
                 
                 # Model Info Preview
@@ -2248,11 +2532,38 @@ with tab_eval:
                 if os.path.exists(model_info_path):
                     with open(model_info_path, 'r') as f:
                         m_meta = json.load(f)
+                        
+                    feat_text = "N/A"
+                    ds_path = m_meta.get('data_source', '').replace('\\', '/')
+                    
+                    summary_path = os.path.join(model_dir, model_to_eval, "prep_summary.json")
+                    if not os.path.exists(summary_path) and ds_path and os.path.exists(os.path.join(ds_path, "prep_summary.json")):
+                        summary_path = os.path.join(ds_path, "prep_summary.json")
+                        
+                    if os.path.exists(summary_path):
+                        try:
+                            with open(summary_path, 'r') as ff:
+                                summ_data = json.load(ff)
+                                if 'selected_features' in summ_data:
+                                    feat_text = ", ".join(summ_data['selected_features'])
+                        except: pass
+                        
+                    if feat_text == "N/A":
+                        feat_path = os.path.join(model_dir, model_to_eval, "selected_features.json")
+                        if not os.path.exists(feat_path) and ds_path and os.path.exists(os.path.join(ds_path, "selected_features.json")):
+                             feat_path = os.path.join(ds_path, "selected_features.json")
+                        if os.path.exists(feat_path):
+                            try:
+                                with open(feat_path, 'r') as ff:
+                                    feat_list = json.load(ff)
+                                feat_text = ", ".join(feat_list)
+                            except: pass
+
                     st.markdown(f"""
                     <div style="background-color: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-bottom: 15px;">
                         <b>Arch:</b> {m_meta.get('architecture', 'N/A').upper()} | 
-                        <b>Features:</b> {m_meta.get('n_features', 'N/A')} | 
-                        <b>Data Source:</b> <span style="color: #94a3b8;">{os.path.basename(m_meta.get('data_source', 'N/A'))}</span>
+                        <b>Data Source:</b> <span style="color: #94a3b8;">{os.path.basename(m_meta.get('data_source', 'N/A'))}</span> <br>
+                        <b>Features ({m_meta.get('n_features', '?')}):</b> <span style="color: #cbd5e1; font-size: 0.85em;">{feat_text}</span>
                     </div>
                     """, unsafe_allow_html=True)
                 
@@ -2352,21 +2663,40 @@ with tab_eval:
         m_train = results['metrics_train']
         m_test = results['metrics_test']
         
+        # ====== Fetch Training Time from meta.json if available ======
+        train_time_str = "N/A"
+        model_info_path = os.path.join(model_dir, disp_model, "meta.json")
+        if os.path.exists(model_info_path):
+            with open(model_info_path, 'r') as f:
+                _meta = json.load(f)
+                seconds = _meta.get('training_time_seconds', 0)
+                if seconds > 0:
+                    train_time_str = float(seconds)
+                    
+        r2_diff = m_train['r2'] - m_test['r2']
+        
         # ====== ROW 1: Metric cards ======
         st.markdown(f"#### Performance Metrics (Test Set - {disp_model})")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         metrics_display = [
             ("MAE", m_test['mae'], " kW"),
             ("RMSE", m_test['rmse'], " kW"),
             ("R\u00b2", m_test['r2'], ""),
             ("WMAPE", m_test.get('wmape', m_test['mape']), "%"),
+            ("Train Time", train_time_str, "s"),
+            ("R\u00b2 Overfit \u0394", r2_diff, ""),
         ]
-        for col, (name, val, unit) in zip([col1, col2, col3, col4], metrics_display):
+        for col, (name, val, unit) in zip([col1, col2, col3, col4, col5, col6], metrics_display):
             with col:
+                if isinstance(val, (int, float)):
+                    val_str = f"{val:.4f}" if name not in ["Train Time"] else f"{val:.1f}"
+                else:
+                    val_str = str(val)
+                    unit = "" # Clear unit if unknown/string
                 st.markdown(f"""<div class="metric-card">
-                    <div class="metric-value">{val:.4f}{unit}</div>
-                    <div class="metric-label">Test {name}</div>
+                    <div class="metric-value">{val_str}{unit}</div>
+                    <div class="metric-label">{name}</div>
                 </div>""", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -2765,117 +3095,159 @@ with tab_compare:
         
         if all_models:
             st.markdown("#### 1. Pilih Model")
-            selected_models = st.multiselect("Pilih model untuk dibandingkan:", all_models, default=all_models[:min(2, len(all_models))])
+            selected_models = st.multiselect("Pilih model untuk dibandingkan:", all_models, 
+                                            default=all_models[:min(2, len(all_models))],
+                                            format_func=lambda x: label_format_with_time(x, model_dir),
+                                            key="ms_comparison")
             
-            if st.button("📊 Run Comparison Analysis", type="primary", width="stretch"):
+            if st.button("📊 Run Comparison Analysis", type="primary", use_container_width=True, key="btn_run_comp"):
                 if not selected_models:
                     st.warning("Pilih minimal satu model.")
                 else:
                     comparison_results = []
                     progress_bar = st.progress(0)
+                    status_text = st.empty()
                     
-                    for i, model_id in enumerate(selected_models):
-                        status_text = st.empty()
-                        status_text.text(f"Mengevaluasi {i+1}/{len(selected_models)}: {model_id}...")
-                        
-                        try:
-                            # 1. Clean session
-                            import gc
-                            tf.keras.backend.clear_session()
-                            gc.collect()
-                            
-                            # 2. Get Model Path
-                            model_path = os.path.join(model_dir, model_id)
-                            model_root = model_dir
-                            if os.path.isdir(model_path):
-                                model_root = model_path
-                                for ext in ['model.keras', 'model.h5']:
-                                    if os.path.exists(os.path.join(model_path, ext)):
-                                        model_path = os.path.join(model_path, ext)
-                                        break
-                            
-                            # 3. Load Model
-                            from src.model_factory import get_custom_objects, compile_model
-                            from src.predictor import evaluate_model
-                            
-                            custom_objs = get_custom_objects()
-                            with tf.keras.utils.custom_object_scope(custom_objs):
-                                model = tf.keras.models.load_model(model_path, compile=False)
-                            
-                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
-                            
-                            # 4. Run Evaluation — Each model loads its OWN bundled data
-                            from src.predictor import evaluate_model
-                            import json as json_mod
-                            
-                            res = None
-                            eval_source = "Unknown"
-                            
-                            # Strategy 1: Load data from model's own data_source in meta.json
-                            meta_path = os.path.join(model_root, "meta.json")
-                            if os.path.exists(meta_path):
-                                with open(meta_path, 'r') as f:
-                                    m_meta = json_mod.load(f)
-                                orig_ds = m_meta.get('data_source', '').replace('\\', '/')
-                                
-                                if orig_ds and os.path.exists(orig_ds):
-                                    # Point config to model's original processed data
-                                    temp_cfg = copy.deepcopy(cfg)
-                                    temp_cfg['paths']['processed_dir'] = orig_ds
-                                    try:
-                                        res = evaluate_model(model, temp_cfg, data=None, scaler_dir=model_root)
-                                        eval_source = "Bundled Data"
-                                    except Exception as e2:
-                                        st.warning(f"Data bundled gagal untuk {model_id}: {e2}")
-                            
-                            # Strategy 2: Fall back to active preprocessing data
-                            if res is None:
-                                active_prep = st.session_state.get('prep_metadata', None)
-                                if active_prep is not None and active_prep.get('X_train') is not None:
-                                    expected_n = model.input_shape[2]
-                                    if active_prep['X_train'].shape[2] == expected_n:
-                                        scaler_dir = model_root if os.path.isdir(model_root) else None
-                                        res = evaluate_model(model, cfg, data=active_prep, scaler_dir=scaler_dir)
-                                        eval_source = "Active Data"
-                                    else:
-                                        raise ValueError(
-                                            f"Feature mismatch: model expects {expected_n}, "
-                                            f"active data has {active_prep['X_train'].shape[2]}. "
-                                            f"Data bundled juga tidak tersedia."
-                                        )
-                                else:
-                                    raise ValueError(
-                                        f"Tidak ada data untuk evaluasi. "
-                                        f"data_source di meta.json tidak valid dan preprocessing belum dijalankan."
-                                    )
+                    # LOG START TO CMD
+                    print("\n" + "="*60)
+                    print(f"📊 COMPARISON START: {datetime.now().strftime('%H:%M:%S')}")
+                    print(f"   Models to evaluate: {len(selected_models)}")
+                    print("="*60)
+                    sys.stdout.flush()
 
+                    with st.spinner("🚀 Sedang menjalankan evaluasi mendalam..."):
+                        for i, model_id in enumerate(selected_models):
+                            msg = f"⏳ [{i+1}/{len(selected_models)}] Mengevaluasi: {model_id}"
+                            status_text.text(msg)
+                            print(f"   {msg}...")
+                            sys.stdout.flush()
                             
-                            # 5. Extract Metrics
-                            m_test = res['metrics_test']
-                            comparison_results.append({
-                                'Model ID': model_id,
-                                'R²': m_test['r2'],
-                                'MAE': m_test['mae'],
-                                'RMSE': m_test['rmse'],
-                                'MAPE (%)': m_test['mape'],
-                                'Features': model.input_shape[2],
-                                'Lookback': model.input_shape[1],
-                                'Verified On': eval_source
-                            })
+                            try:
+                                # 1. Clean session
+                                tf.keras.backend.clear_session()
+                                gc.collect()
+                                
+                                # 2. Get Model Path
+                                model_path = os.path.join(model_dir, model_id)
+                                model_root = model_dir
+                                if os.path.isdir(model_path):
+                                    model_root = model_path
+                                    for ext in ['model.keras', 'model.h5']:
+                                        if os.path.exists(os.path.join(model_path, ext)):
+                                            model_path = os.path.join(model_path, ext)
+                                            break
+                                
+                                # 3. Load Model
+                                custom_objs = get_custom_objects()
+                                with tf.keras.utils.custom_object_scope(custom_objs):
+                                    model = tf.keras.models.load_model(model_path, compile=False)
+                                
+                                compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                                
+                                # 4. Run Evaluation
+                                res = None
+                                eval_source = "Unknown"
+                                
+                                # Strategy 1: Load data from model's own data_source in meta.json
+                                meta_path = os.path.join(model_root, "meta.json")
+                                if os.path.exists(meta_path):
+                                    try:
+                                        with open(meta_path, 'r') as f:
+                                            m_meta = json.load(f)
+                                        orig_ds = m_meta.get('data_source', '').replace('\\', '/')
+                                        
+                                        if orig_ds and os.path.exists(orig_ds):
+                                            temp_cfg = copy.deepcopy(cfg)
+                                            temp_cfg['paths']['processed_dir'] = orig_ds
+                                            res = evaluate_model(model, temp_cfg, data=None, scaler_dir=model_root)
+                                            eval_source = "Bundled Data"
+                                    except Exception as e_meta:
+                                        print(f"      (!) Meta failed: {e_meta}")
+                                
+                                # Strategy 2: Fall back to active preprocessing data
+                                if res is None:
+                                    active_prep = st.session_state.get('prep_metadata', None)
+                                    if active_prep is not None and active_prep.get('X_train') is not None:
+                                        expected_n = model.input_shape[2]
+                                        if active_prep['X_train'].shape[2] == expected_n:
+                                            scaler_dir = model_root if os.path.isdir(model_root) else None
+                                            res = evaluate_model(model, cfg, data=active_prep, scaler_dir=scaler_dir)
+                                            eval_source = "Active Data"
+                                        else:
+                                            raise ValueError(f"Dim mismatch: Model={expected_n}, Prep={active_prep['X_train'].shape[2]}")
+                                    else:
+                                        raise ValueError("No valid data source found for this model.")
+
+                                # 5. Extract Metrics
+                                m_test = res['metrics_test']
+                                m_train = res['metrics_train']
+                                
+                                train_time = m_meta.get('training_time_seconds', 0) if m_meta else 0
+                                
+                                feat_text = "N/A"
+                                ds_path = m_meta.get('data_source', '').replace('\\', '/') if m_meta else ''
+                                
+                                summary_path = os.path.join(model_root, "prep_summary.json")
+                                if not os.path.exists(summary_path) and ds_path and os.path.exists(os.path.join(ds_path, "prep_summary.json")):
+                                    summary_path = os.path.join(ds_path, "prep_summary.json")
+                                    
+                                if os.path.exists(summary_path):
+                                    try:
+                                        with open(summary_path, 'r') as ff:
+                                            summ_data = json.load(ff)
+                                            if 'selected_features' in summ_data:
+                                                feat_text = ", ".join(summ_data['selected_features'])
+                                    except: pass
+                                    
+                                if feat_text == "N/A":
+                                    feat_path = os.path.join(model_root, "selected_features.json")
+                                    if not os.path.exists(feat_path) and ds_path and os.path.exists(os.path.join(ds_path, "selected_features.json")):
+                                         feat_path = os.path.join(ds_path, "selected_features.json")
+                                            
+                                    if os.path.exists(feat_path):
+                                        try:
+                                            with open(feat_path, 'r') as ff:
+                                                feat_list = json.load(ff)
+                                            feat_text = ", ".join(feat_list)
+                                        except: pass
+                                
+                                comparison_results.append({
+                                    'Model ID': model_id,
+                                    'Test R²': m_test['r2'],
+                                    'Train R²': m_train['r2'],
+                                    'Overfit Δ': m_train['r2'] - m_test['r2'],
+                                    'MAE': m_test['mae'],
+                                    'RMSE': m_test['rmse'],
+                                    'MAPE (%)': m_test['mape'],
+                                    'Train Time (s)': train_time,
+                                    'Features N': model.input_shape[2],
+                                    'Feature List': feat_text,
+                                    'Lookback': model.input_shape[1],
+                                    'Verified On': eval_source
+                                })
+                                print(f"      ✅ Done (R²: {m_test['r2']:.4f})")
+                                
+                            except Exception as e:
+                                err_info = str(e)
+                                st.error(f"Error pada {model_id}: {err_info}")
+                                print(f"      ❌ ERROR: {err_info}")
+                                comparison_results.append({
+                                    'Model ID': model_id,
+                                    'Test R²': 0, 'Train R²': 0, 'Overfit Δ': 0, 
+                                    'MAE': 999, 'RMSE': 999, 'MAPE (%)': 999, 'Train Time (s)': 0,
+                                    'Features N': 'Error', 'Feature List': 'Error',
+                                    'Lookback': 'Error', 'Verified On': 'Error'
+                                })
                             
-                        except Exception as e:
-                            st.error(f"Gagal mengevaluasi {model_id}: {e}")
-                            comparison_results.append({
-                                'Model ID': model_id,
-                                'R²': 0, 'MAE': 999, 'RMSE': 999, 'MAPE (%)': 999,
-                                'Features': 'Error', 'Lookback': 'Error'
-                            })
+                            progress_bar.progress((i + 1) / len(selected_models))
+                            sys.stdout.flush()
                         
-                        progress_bar.progress((i + 1) / len(selected_models))
                         status_text.empty()
-                    
-                    st.session_state.comparison_df = pd.DataFrame(comparison_results)
-                    st.success("Analisis perbandingan selesai!")
+                        st.session_state.comparison_df = pd.DataFrame(comparison_results)
+                        print(f"\n✅ COMPARISON FINISHED: {len(comparison_results)} models analyzed.")
+                        print("="*60 + "\n")
+                        sys.stdout.flush()
+                        st.success("Analisis perbandingan selesai! Hasil tampil di bawah.")
 
             # Display Results if they exist in session
             if 'comparison_df' in st.session_state:
@@ -2894,22 +3266,49 @@ with tab_compare:
                     return ['background-color: rgba(16, 185, 129, 0.2)' if v else '' for v in is_min]
 
                 styled_df = df_comp.style.format({
-                    'R²': '{:.4f}', 'MAE': '{:.4f}', 'RMSE': '{:.4f}', 'MAPE (%)': '{:.2f}'
-                }).apply(highlight_max, subset=['R²']).apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE (%)'])
+                    'Test R²': '{:.4f}', 'Train R²': '{:.4f}', 'Overfit Δ': '{:.4f}',
+                    'MAE': '{:.4f}', 'RMSE': '{:.4f}', 'MAPE (%)': '{:.2f}', 'Train Time (s)': '{:.1f}'
+                }).apply(highlight_max, subset=['Test R²']).apply(highlight_min, subset=['MAE', 'RMSE', 'MAPE (%)', 'Overfit Δ'])
                 
                 st.dataframe(styled_df, width="stretch")
                 
+                # --- EXPORT TO EXCEL/CSV BUTTON ---
+                st.markdown("<br>", unsafe_allow_html=True)
+                export_col1, _ = st.columns([1, 3])
+                with export_col1:
+                    import io
+                    try:
+                        excel_buffer = io.BytesIO()
+                        df_comp.to_excel(excel_buffer, index=False, engine='openpyxl')
+                        excel_data = excel_buffer.getvalue()
+                        st.download_button(
+                            label="📥 Export Tabel ke Excel (.xlsx)",
+                            data=excel_data,
+                            file_name='model_comparison_results.xlsx',
+                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        )
+                    except Exception:
+                        # Fallback to CSV if openpyxl is not installed
+                        csv_data = df_comp.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Export Tabel ke Excel (.csv)",
+                            data=csv_data,
+                            file_name='model_comparison_results.csv',
+                            mime='text/csv'
+                        )
+                st.markdown("<br>", unsafe_allow_html=True)
+                
                 # Visualization
                 st.markdown("#### 3. Visual Comparison")
-                c1, c2 = st.columns(2)
                 
+                # First Row: R2 and MAE
+                c1, c2 = st.columns(2)
                 with c1:
-                    fig_r2 = px.bar(df_comp, x='Model ID', y='R²', color='R²', 
-                                   title="R² Score (Higher is Better)",
+                    fig_r2 = px.bar(df_comp, x='Model ID', y='Test R²', color='Test R²', 
+                                   title="Test R² Score (Higher is Better)",
                                    color_continuous_scale='Viridis')
                     fig_r2.update_layout(template="plotly_dark", height=400)
                     st.plotly_chart(fig_r2, width="stretch")
-                
                 with c2:
                     fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='MAE',
                                     title="MAE Score (Lower is Better)",
@@ -2917,12 +3316,28 @@ with tab_compare:
                     fig_mae.update_layout(template="plotly_dark", height=400)
                     st.plotly_chart(fig_mae, width="stretch")
                 
+                # Second Row: Train Time and Overfitting Delta
+                c3, c4 = st.columns(2)
+                with c3:
+                    fig_time = px.bar(df_comp, x='Model ID', y='Train Time (s)', color='Train Time (s)',
+                                    title="Training Time in Seconds (Lower is Faster)",
+                                    color_continuous_scale='Oranges')
+                    fig_time.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig_time, width="stretch")
+                with c4:
+                    fig_overfit = px.bar(df_comp, x='Model ID', y='Overfit Δ', color='Overfit Δ',
+                                    title="Overfit Δ: Train R² - Test R² (Closer to 0 is Better)",
+                                    color_continuous_scale='RdBu_r')
+                    fig_overfit.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig_overfit, width="stretch")
+                
+                
                 # Radar Chart
                 st.markdown("#### 4. Performance Radar")
                 radar_data = df_comp.copy()
-                cols_to_norm = ['R²', 'MAE', 'RMSE', 'MAPE (%)']
+                cols_to_norm = ['Test R²', 'MAE', 'RMSE', 'MAPE (%)']
                 for col in cols_to_norm:
-                    if col == 'R²':
+                    if col == 'Test R²':
                         radar_data[col] = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
                     else:
                         norm = (radar_data[col] - radar_data[col].min()) / (radar_data[col].max() - radar_data[col].min() + 1e-6)
@@ -2931,8 +3346,8 @@ with tab_compare:
                 fig_radar = go.Figure()
                 for i, row in radar_data.iterrows():
                     fig_radar.add_trace(go.Scatterpolar(
-                        r=[row['R²'], row['MAE'], row['RMSE'], row['MAPE (%)']],
-                        theta=['R²', 'MAE (Inverted)', 'RMSE (Inverted)', 'MAPE (Inverted)'],
+                        r=[row['Test R²'], row['MAE'], row['RMSE'], row['MAPE (%)']],
+                        theta=['Test R²', 'MAE (Inverted)', 'RMSE (Inverted)', 'MAPE (Inverted)'],
                         fill='toself',
                         name=row['Model ID']
                     ))

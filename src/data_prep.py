@@ -236,6 +236,12 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
         df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
         
+    if fg.get('time_day', True) if 'time_day' in fg else fg.get('time', True):
+        # Scale day of month by the number of days in that specific month
+        days_in_month = df.index.days_in_month
+        df['day_sin'] = np.sin(2 * np.pi * df.index.day / days_in_month)
+        df['day_cos'] = np.cos(2 * np.pi * df.index.day / days_in_month)
+        
     if fg.get('time_doy', True) if 'time_doy' in fg else fg.get('time', True):
         # Using 365.25 to account for leap years roughly
         df['day_of_year_sin'] = np.sin(2 * np.pi * df.index.dayofyear / 365.25)
@@ -299,7 +305,13 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
         # Filter to only those that actually exist in df
         selected = [c for c in manual_list if c in df.columns]
         print(f"🛠️ Manual Selection Mode: {len(selected)} features selected.")
-        return selected, df[selected].corr()
+        
+        # Ensure target is always present in the plot/correlation matrix
+        display_cols = list(selected)
+        if target_col in df.columns and target_col not in display_cols:
+            display_cols.append(target_col)
+            
+        return selected, df[display_cols].corr()
 
     time_col = cfg['data']['time_col']
     corr_threshold = cfg['features']['corr_threshold']
@@ -325,6 +337,7 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
         # Identify specific time features
         is_hour = 'hour_' in c
         is_month = 'month_' in c
+        is_day = 'day_sin' in c or 'day_cos' in c
         is_doy = 'day_of_year_' in c
         is_year = 'year_linear' in c
         
@@ -336,6 +349,8 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
             if grps.get('time_hour', True) or grps.get('time', True): filtered_candidates.append(c)
         elif is_month:
             if grps.get('time_month', True) or grps.get('time', True): filtered_candidates.append(c)
+        elif is_day:
+            if grps.get('time_day', True) or grps.get('time', True): filtered_candidates.append(c)
         elif is_doy:
             if grps.get('time_doy', True) or grps.get('time', True): filtered_candidates.append(c)
         elif is_year:
@@ -385,7 +400,12 @@ def select_features_hybrid(df: pd.DataFrame, target_col: str, cfg: dict):
     print(f"\n=== FINAL: {len(selected)} features selected ===")
     
     # Return the full correlation matrix for the final selected features
-    final_corr_matrix = df[selected].corr()
+    # Ensure target is always present in the plot/correlation matrix
+    display_cols = list(selected)
+    if target_col in df.columns and target_col not in display_cols:
+        display_cols.append(target_col)
+        
+    final_corr_matrix = df[display_cols].corr()
     return selected, final_corr_matrix
 
 
@@ -425,12 +445,8 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     
     # NEW: Data Trimming (Mangkas Data)
     pcfg = cfg.get('preprocessing', {})
-    trim_rows = pcfg.get('trim_rows')
-    if trim_rows and isinstance(trim_rows, int) and trim_rows > 0:
-        print(f"✂️ Trimming data to first {trim_rows} rows...")
-        df = df.head(trim_rows)
     
-    # Robust date parsing
+    # Robust date parsing MUST happen first before date-based filtering
     try:
         fmt = cols.get('time_format')
         if fmt and fmt.lower() not in ['auto', 'none', 'infer']:
@@ -440,8 +456,35 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     except Exception as e:
         print(f"  Warning: Format '{fmt}' failed ({e}). Trying mixed format auto-detection...")
         df[cols['time_col']] = pd.to_datetime(df[cols['time_col']], format='mixed')
+        
+    subset_mode = pcfg.get('subset_mode', 'semua_data')
     
-    print(f"Original shape: {df.shape}")
+    if subset_mode == 'baris':
+        trim_rows = pcfg.get('trim_rows')
+        if trim_rows and isinstance(trim_rows, int) and trim_rows > 0:
+            print(f"✂️ Trimming data to first {trim_rows} rows...")
+            df = df.head(trim_rows)
+            
+    elif subset_mode == 'tanggal':
+        start_date = pcfg.get('start_date')
+        end_date = pcfg.get('end_date')
+        if start_date and end_date:
+            print(f"✂️ Filtering data between {start_date} and {end_date}...")
+            # Ensure time column is datetime, create mask based on local date
+            mask = (df[cols['time_col']].dt.date >= pd.to_datetime(start_date).date()) & \
+                   (df[cols['time_col']].dt.date <= pd.to_datetime(end_date).date())
+            df = df.loc[mask].copy()
+            if df.empty:
+                raise ValueError(f"CRITICAL ERROR: Tidak ada baris data yang ditemukan pada rentang {start_date} hingga {end_date}.")
+                
+    else:
+        # Fallback to old trim logic if 'semua_data' but legacy trim_rows exists
+        trim_rows = pcfg.get('trim_rows')
+        if trim_rows and isinstance(trim_rows, int) and trim_rows > 0 and subset_mode != 'semua_data':
+            print(f"✂️ Trimming data to first {trim_rows} rows...")
+            df = df.head(trim_rows)
+    
+    print(f"Original shape (after subset filtering): {df.shape}")
 
     # 2. Preprocessing Algorithm 1
     df_clean = preprocess_algorithm1(df, cfg)

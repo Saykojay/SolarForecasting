@@ -12,12 +12,13 @@ data:
   wind_dir_col: wind_direction_deg
   wind_speed_col: wind_speed_ms
 features:
-  corr_threshold: 0.3
+  corr_threshold: 0.15
   groups:
-    lags: true
-    physics: true
-    rolling: true
+    lags: false
+    physics: false
+    rolling: false
     time: false
+    time_day: true
     time_doy: true
     time_hour: true
     time_month: true
@@ -36,22 +37,20 @@ mlflow:
   experiment_name: PatchTST_CSI_TransferLearning
   tracking_uri: mlruns
 model:
-  architecture: patchtst
+  architecture: timeperceiver
   hyperparameters:
     batch_size: 32
     d_model: 128
-    dropout: 0.2
-    ff_dim: 256
-    learning_rate: 0.0001
+    dropout: 0.1
+    learning_rate: 0.0005
     lookback: 72
-    n_heads: 16
-    n_layers: 3
-    patch_len: 16
-    stride: 8
+    n_latent_tokens: 32
+    n_layers: 2
+    use_bidirectional: true
 paths:
   logs_dir: logs
   models_dir: models
-  processed_dir: data/processed/v2_fullp0,3
+  processed_dir: data/processed
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
@@ -62,6 +61,8 @@ preprocessing:
   productive_hours_threshold: 50
   remove_outliers: true
   resample_1h: true
+  subset_mode: baris
+  trim_rows: 20000
 pv_system:
   nameplate_capacity_kw: 15.93
   ref_temp: 25
