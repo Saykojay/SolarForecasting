@@ -9,6 +9,7 @@ tensorflow>=2.10
 
 # Experiment Tracking
 optuna
+optuna-integration[tfkeras]
 mlflow
 
 # TUI & Visuals

@@ -87,24 +87,35 @@ def evaluate_physics_baseline(model_type, df_test, capacity_kw=None):
     location = Location(latitude=lat, longitude=lat, tz='Asia/Jakarta')
     
     # Ekstraksi Cuaca
-    expected_cols = ['GHI', 'DNI', 'DHI', 'temp_air', 'wind_speed']
+    # Kamus sinonim nama kolom (berguna jika nama dataset berbeda)
+    alias_map = {
+        'GHI': ['ghi', 'global_', 'poa_global', 'irradiance_global'],
+        'DNI': ['dni', 'direct_', 'irradiance_direct'],
+        'DHI': ['dhi', 'diffuse_', 'irradiance_diffuse'],
+        'temp_air': ['temp_air', 'ambient_temp', 'temp', 'temperature'],
+        'wind_speed': ['wind_speed', 'wind', 'ws', 'kecepatan_angin']
+    }
+    
     weather = pd.DataFrame(index=df_test.index)
     col_map = {}
-    for c in expected_cols:
-        matches = [col for col in df_test.columns if col.lower() == c.lower()]
-        if matches:
-            col_map[c] = matches[0]
-        else:
-            # Cari substring jika tidak exact match
-            matches = [col for col in df_test.columns if c.lower() in col.lower()]
-            if matches: col_map[c] = matches[0]
+    
+    for exact_key, aliases in alias_map.items():
+        if exact_key in df_test.columns:
+            col_map[exact_key] = exact_key
+            continue
+            
+        for alias in aliases:
+            matches = [col for col in df_test.columns if alias.lower() in col.lower()]
+            if matches:
+                col_map[exact_key] = matches[0]
+                break
     
     try:
-        weather['ghi'] = df_test[col_map.get('GHI', 'ghi')]
-        weather['dni'] = df_test[col_map.get('DNI', 'dni')]
-        weather['dhi'] = df_test[col_map.get('DHI', 'dhi')]
-        weather['temp_air'] = df_test[col_map.get('temp_air', 'temp_air')]
-        weather['wind_speed'] = df_test[col_map.get('wind_speed', 'wind_speed')]
+        weather['ghi'] = df_test[col_map['GHI']] if 'GHI' in col_map else 0
+        weather['dni'] = df_test[col_map['DNI']] if 'DNI' in col_map else 0
+        weather['dhi'] = df_test[col_map['DHI']] if 'DHI' in col_map else 0
+        weather['temp_air'] = df_test[col_map['temp_air']] if 'temp_air' in col_map else 25.0
+        weather['wind_speed'] = df_test[col_map['wind_speed']] if 'wind_speed' in col_map else 1.0
     except KeyError as e:
         raise ValueError(f"Kolom cuaca tidak lengkap untuk {model_type}. Butuh GHI,DNI,DHI,temp_air,wind_speed. Error: {e}")
 
@@ -126,7 +137,7 @@ def evaluate_physics_baseline(model_type, df_test, capacity_kw=None):
         system = PVSystem(surface_tilt=15, surface_azimuth=180, 
                           module_parameters={'pdc0': capacity_kw*1000, 'gamma_pdc': -0.004},
                           inverter_parameters={'pdc0': capacity_kw*1000, 'eta_inv_nom': 0.96},
-                          temperature_model_parameters=TEMPERATURE_MODEL_PARAMETERS['sapm']['roof_mount_glass_polymer'])
+                          temperature_model_parameters=TEMPERATURE_MODEL_PARAMETERS['sapm']['open_rack_glass_glass'])
         mc = ModelChain(system, location, aoi_model='physical', spectral_model='no_loss')
     else:
         raise ValueError(f"Fisika model {model_type} tidak dikenali.")

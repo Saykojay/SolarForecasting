@@ -2092,12 +2092,12 @@ with tab_baseline:
     c_b1, c_b2 = st.columns([1, 1])
     
     with c_b1:
-        baseline_group = st.selectbox("Pilih Kategori Baseline", ["Classical Machine Learning", "Physics Models (PVLib)"])
+        baseline_group = st.selectbox("Pilih Kategori Baseline", ["Classical Machine Learning", "Physics Models (PVLib)"], key="baseline_group_sel")
         
-        if baseline_group == "Classical Machine Learning":
-            b_model = st.selectbox("Pilih Algoritma", ["Linear Regression", "Ridge Regression", "Random Forest"])
-        else:
-            b_model = st.selectbox("Pilih Model Fisika", ["PVWatts", "Single Diode (SAPM)"])
+        b_options = ["Linear Regression", "Ridge Regression", "Random Forest"] if baseline_group == "Classical Machine Learning" else ["PVWatts", "Single Diode (SAPM)"]
+        b_label = "Pilih Algoritma" if baseline_group == "Classical Machine Learning" else "Pilih Model Fisika"
+        
+        b_model = st.selectbox(b_label, b_options, key="b_model_sel")
             
     with c_b2:
         st.markdown("**Pemilihan Data**")
@@ -2135,6 +2135,7 @@ with tab_baseline:
                         if not os.path.exists(y_scaler_path):
                             y_scaler_path = os.path.join(proc_dir, 'y_scaler.pkl')
                             
+                        import joblib
                         y_scaler = joblib.load(y_scaler_path) if os.path.exists(y_scaler_path) else None
                         
                         res = evaluate_ml_baseline(b_model, X_train, y_train, X_test, y_test, y_scaler=y_scaler)
@@ -2464,102 +2465,9 @@ with tab_tuning:
         
     else:
         st.info("Belum ada hasil tuning tersimpan.")
-        
-        # Setup Tuning Execution Section
-        st.markdown('<div class="pipeline-step">', unsafe_allow_html=True)
-        st.markdown("#### 🚀 Eksekusi Tuning")
-        st.write("Tuning akan mencari hyperparameter terbaik berdasarkan data yang dipilih di atas.")
-        
-        cols = st.columns([1, 1, 1])
-        with cols[0]:
-            st.write(f"**Arsitektur:** {new_arch.upper()}")
-        with cols[1]:
-            st.write(f"**Trials:** {cfg['tuning']['n_trials']}")
-        with cols[2]:
-            st.write(f"**Data Status:** {'✅ Ready' if has_data else '❌ Missing'}")
-        
-        tune_col_d1, tune_col_loss, tune_col_d2 = st.columns([1, 1, 2])
-        with tune_col_d1:
-            tune_device = st.radio("🖥️ Device", ["CPU", "GPU"], index=0, 
-                                   horizontal=True, key="tune_device_bottom",
-                                   help="CPU direkomendasikan untuk stabilitas.")
-        with tune_col_loss:
-            _opt_loss = ['mse', 'huber', 'mae']
-            tune_loss_fn = st.selectbox("Loss Function", _opt_loss, index=_opt_loss.index(cfg['model']['hyperparameters'].get('loss_fn', 'mse')) if cfg['model']['hyperparameters'].get('loss_fn') in _opt_loss else 0, key="tune_loss_fn")
-        with tune_col_d2:
-            run_tune_bottom = st.button("🔥 Jalankan Optuna Tuning", type="primary", width="stretch", 
-                                  disabled=not has_data, key="btn_tune_tab")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if cfg['tuning']['enabled']:
-            st.markdown("#### 🛠️ Edit Search Space")
-            st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
-            
-            space = cfg['tuning']['search_space']
-            
-            # Create a nice editor for the search space
-            with st.expander("Configure Search Space Details", expanded=True):
-                col_s1, col_s2, col_s3 = st.columns(3)
-                
-                # Patching Params
-                with col_s1:
-                    st.markdown("**1. Patching & Stride**")
-                    p_vals = space.get('patch_len', [8, 24, 4])
-                    p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min")
-                    p_max = st.number_input("Patch Max", p_min, 128, p_vals[1], 2, key="p_max")
-                    p_step = st.number_input("Patch Step", 1, 16, p_vals[2], 1, key="p_step")
-                    space['patch_len'] = [p_min, p_max, p_step]
-                    
-                    s_vals = space.get('stride', [4, 12, 2])
-                    s_min = st.number_input("Stride Min", 1, 32, s_vals[0], 1, key="s_min")
-                    s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key="s_max")
-                    s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key="s_step")
-                    space['stride'] = [s_min, s_max, s_step]
-
-                # Architecture Params
-                with col_s2:
-                    st.markdown("**2. Model Capacity**")
-                    d_vals = space.get('d_model', [64, 256])
-                    d_min = st.number_input("D_Model Min", 32, 512, d_vals[0], 32, key="d_min")
-                    d_max = st.number_input("D_Model Max", d_min, 1024, d_vals[1], 32, key="d_max")
-                    space['d_model'] = [d_min, d_max]
-                    
-                    l_vals = space.get('n_layers', [3, 8])
-                    l_min = st.number_input("Layers Min", 1, 12, l_vals[0], 1, key="l_min")
-                    l_max = st.number_input("Layers Max", l_min, 20, l_vals[1], 1, key="l_max")
-                    space['n_layers'] = [l_min, l_max]
-
-                # Training Params
-                with col_s3:
-                    st.markdown("**3. Time & Speed**")
-                    loc_vals = space.get('lookback', [48, 336, 24])
-                    loc_min = st.number_input("Lookback Min", 24, 720, loc_vals[0], 24, key="loc_min")
-                    loc_max = st.number_input("Lookback Max", loc_min, 1440, loc_vals[1], 24, key="loc_max")
-                    loc_step = st.number_input("Lookback Step", 12, 168, loc_vals[2], 12, key="loc_step")
-                    space['lookback'] = [loc_min, loc_max, loc_step]
-                    
-                    lr_vals = space.get('learning_rate', [5e-5, 1e-3])
-                    lr_min = st.number_input("LR Min", 1e-6, 1e-1, lr_vals[0], format="%.6f", key="lr_min")
-                    lr_max = st.number_input("LR Max", lr_min, 1e-1, lr_vals[1], format="%.6f", key="lr_max")
-                    space['learning_rate'] = [lr_min, lr_max]
-
-            # Show active summary table
-            st.markdown("#### Search Space Aktif (Hyperparameters)")
-            space_df = pd.DataFrame([
-                {'Parameter': k, 'Range': str(v)} for k, v in space.items()
-            ])
-            st.dataframe(space_df, width='stretch', hide_index=True)
-            
-            if st.button("💾 Save Search Space to Master Config", width="stretch"):
-                cfg['tuning']['search_space'] = space
-                save_config_to_file(cfg)
-                st.success("Search space berhasil disimpan ke config.yaml!")
-        else:
-            st.warning("⚠️ **Optuna Tuning Belum Aktif**. Aktifkan melalui toggle 'Enable Optuna Tuning' pada sidebar di sebelah kiri.")
-            st.info("Tuning memungkinkan sistem mencari arsitektur terbaik secara otomatis untuk mencapai R² yang lebih tinggi.")
 
     # --- EXECUTION LOGIC FOR TUNING ---
-    is_run_tune = locals().get('run_tune', False) or locals().get('run_tune_bottom', False)
+    is_run_tune = st.session_state.get('btn_tune_execute', False)
     if is_run_tune:
         st.markdown("### 🔍 Live Tuning Monitor")
         

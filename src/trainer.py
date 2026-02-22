@@ -177,7 +177,10 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
-    from optuna.integration import TFKerasPruningCallback
+    try:
+        from optuna_integration import TFKerasPruningCallback
+    except ImportError:
+        from optuna.integration import TFKerasPruningCallback
     import mlflow
     from src.model_factory import build_model, compile_model
     from src.data_prep import create_sequences_with_indices
@@ -228,34 +231,83 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
         # Suggest hyperparameters
         hp = {}
-        hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
-        hp['stride'] = trial.suggest_int('stride', space['stride'][0], space['stride'][1], step=space['stride'][2])
-        hp['d_model'] = trial.suggest_categorical('d_model', space['d_model'])
-        hp['n_heads'] = trial.suggest_categorical('n_heads', space['n_heads'])
-        hp['n_layers'] = trial.suggest_int('n_layers', space['n_layers'][0], space['n_layers'][1])
-        hp['dropout'] = trial.suggest_float('dropout', space['dropout'][0], space['dropout'][1])
-        hp['learning_rate'] = trial.suggest_float('learning_rate', space['learning_rate'][0], space['learning_rate'][1], log=True)
-        hp['batch_size'] = trial.suggest_categorical('batch_size', space['batch_size'])
-        hp['lookback'] = trial.suggest_int('lookback', space['lookback'][0], space['lookback'][1], step=space['lookback'][2])
-
-        # --- CONSTRAINT 1: patch_len must fit within lookback ---
-        if hp['patch_len'] > hp['lookback']:
-            hp['patch_len'] = hp['lookback'] // 2
-
-        # --- CONSTRAINT 2: stride must be <= patch_len ---
-        if hp['stride'] > hp['patch_len']:
-            hp['stride'] = hp['patch_len']
-
-        # --- CONSTRAINT 3: d_model must be divisible by n_heads ---
-        if hp['d_model'] % hp['n_heads'] != 0:
-            # Find the nearest valid n_heads (largest divisor <= current n_heads)
-            valid_heads = [h for h in space['n_heads'] if hp['d_model'] % h == 0]
-            if valid_heads:
-                hp['n_heads'] = max(valid_heads)
+        
+        # General Hyperparameters (Supported across most models)
+        if 'd_model' in space:
+            if isinstance(space['d_model'], list) and len(space['d_model']) == 2 and isinstance(space['d_model'][0], int):
+                hp['d_model'] = trial.suggest_categorical('d_model', [2**i for i in range(int(np.log2(space['d_model'][0])), int(np.log2(space['d_model'][1]))+1)])
             else:
-                # Fallback: use n_heads=1 or 2 (always divides)
-                hp['n_heads'] = max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
-            logger.info(f"Auto-corrected n_heads to {hp['n_heads']} (d_model={hp['d_model']})")
+                hp['d_model'] = trial.suggest_categorical('d_model', space['d_model'])
+                
+        if 'n_layers' in space:
+            hp['n_layers'] = trial.suggest_int('n_layers', space['n_layers'][0], space['n_layers'][1])
+            
+        if 'dropout' in space:
+            hp['dropout'] = trial.suggest_float('dropout', space['dropout'][0], space['dropout'][1])
+            
+        if 'learning_rate' in space:
+            hp['learning_rate'] = trial.suggest_float('learning_rate', space['learning_rate'][0], space['learning_rate'][1], log=True)
+            
+        if 'batch_size' in space:
+            if isinstance(space['batch_size'], list) and len(space['batch_size']) == 2 and isinstance(space['batch_size'][0], int):
+                hp['batch_size'] = trial.suggest_categorical('batch_size', [2**i for i in range(int(np.log2(space['batch_size'][0])), int(np.log2(space['batch_size'][1]))+1)])
+            else:
+                hp['batch_size'] = trial.suggest_categorical('batch_size', space['batch_size'])
+                
+        if 'lookback' in space:
+            hp['lookback'] = trial.suggest_int('lookback', space['lookback'][0], space['lookback'][1], step=space['lookback'][2])
+
+
+        # Architecture-Specific Hyperparameters
+        if arch == 'patchtst':
+            if 'patch_len' in space:
+                hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
+            else:
+                hp['patch_len'] = 16
+                
+            if 'stride' in space:
+                hp['stride'] = trial.suggest_int('stride', space['stride'][0], space['stride'][1], step=space['stride'][2])
+            else:
+                hp['stride'] = 8
+                
+            if 'n_heads' in space:
+                if isinstance(space['n_heads'], list) and len(space['n_heads']) == 2 and isinstance(space['n_heads'][0], int):
+                    hp['n_heads'] = trial.suggest_categorical('n_heads', [2**i for i in range(int(np.log2(space['n_heads'][0])), int(np.log2(space['n_heads'][1]))+1)])
+                else:
+                    hp['n_heads'] = trial.suggest_categorical('n_heads', space['n_heads'])
+            else:
+                hp['n_heads'] = 8
+                
+            if 'ff_dim' in space:
+                if isinstance(space['ff_dim'], list) and len(space['ff_dim']) == 2 and isinstance(space['ff_dim'][0], int):
+                    hp['ff_dim'] = trial.suggest_categorical('ff_dim', [2**i for i in range(int(np.log2(space['ff_dim'][0])), int(np.log2(space['ff_dim'][1]))+1)])
+                else:
+                    hp['ff_dim'] = trial.suggest_categorical('ff_dim', space['ff_dim'])
+
+            # --- CONSTRAINT 1: patch_len must fit within lookback ---
+            if hp['patch_len'] > hp['lookback']:
+                hp['patch_len'] = max(2, hp['lookback'] // 2)
+
+            # --- CONSTRAINT 2: stride must be <= patch_len ---
+            if hp['stride'] > hp['patch_len']:
+                hp['stride'] = hp['patch_len']
+
+            # --- CONSTRAINT 3: d_model must be divisible by n_heads ---
+            if 'd_model' in hp and hp['d_model'] % hp['n_heads'] != 0:
+                # Find the nearest valid n_heads (largest divisor <= current n_heads)
+                valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
+                if valid_heads:
+                    hp['n_heads'] = max(valid_heads)
+                else:
+                    # Fallback: use n_heads=1 or 2 (always divides)
+                    hp['n_heads'] = max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
+                logger.info(f"Auto-corrected n_heads to {hp['n_heads']} (d_model={hp['d_model']})")
+        else:
+            # For non-PatchTST models like GRU/LSTM, preserve specific params from cfg
+            if 'use_bidirectional' in cfg['model']['hyperparameters']:
+                hp['use_bidirectional'] = cfg['model']['hyperparameters']['use_bidirectional']
+            if 'use_revin' in cfg['model']['hyperparameters']:
+                hp['use_revin'] = cfg['model']['hyperparameters']['use_revin']
 
         X_full = data['X_train']
         y_full = data['y_train']
