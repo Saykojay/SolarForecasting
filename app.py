@@ -2107,23 +2107,50 @@ with tab_tuning:
     # Data & Fitur are now in their own tabs
     st.info("💡 **Tips**: Pengaturan dataset, cleaning, dan fitur kini dikelola di tab **Data Insights**, **Preprocessing**, dan **Feature Lab** sesuai alur pipeline.")
 
-    # Added: Mini Analytics inside Tuning Tab for immediate feedback
-    if st.session_state.prep_metadata:
-        m = st.session_state.prep_metadata
-        st.markdown(f"""
-        <div style="background-color: rgba(129, 140, 248, 0.1); padding: 15px; border-radius: 10px; border-left: 5px solid #818cf8; margin-bottom: 20px;">
-            <h4 style="margin-top:0;">📊 Summary Data Preprocessing</h4>
-            <div style="display: flex; justify-content: space-between;">
-                <div><b>Final Rows:</b> {m['stats']['after_algorithm1']:,}</div>
-                <div><b>Features:</b> {len(m['selected_features'])}</div>
-                <div><b>Sequences:</b> {m['stats']['train_final']:,}</div>
+    # Added: Data Selection and Mini Analytics inside Tuning Tab for immediate feedback
+    st.markdown("**📂 Pilih Versi Dataset untuk Tuning**")
+    proc_dir = cfg['paths']['processed_dir']
+    base_dir = os.path.dirname(proc_dir) 
+    
+    versions = []
+    if os.path.exists(base_dir):
+        versions = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("processed_")]
+        versions.sort(key=lambda x: os.path.getmtime(os.path.join(base_dir, x)), reverse=True)
+    options = ["Latest (Default)"] + versions
+    
+    selected_v_tune = st.selectbox("Gunakan Versi Data untuk Tuning:", options, index=0, key="data_version_tune",
+                           format_func=lambda x: label_format_with_time(x, base_dir) if x != "Latest (Default)" else x)
+                           
+    if selected_v_tune == "Latest (Default)":
+        active_tune_dir = proc_dir
+    else:
+        active_tune_dir = os.path.join(base_dir, selected_v_tune)
+        
+    cfg['paths']['processed_dir'] = active_tune_dir
+    has_data = os.path.exists(os.path.join(active_tune_dir, 'X_train.npy'))
+
+    if has_data:
+        try:
+            with open(os.path.join(active_tune_dir, 'meta.json'), 'r') as f:
+                m = json.load(f)
+            
+            st.markdown(f"""
+            <div style="background-color: rgba(129, 140, 248, 0.1); padding: 15px; border-radius: 10px; border-left: 5px solid #818cf8; margin-bottom: 20px;">
+                <h4 style="margin-top:0;">📊 Dataset Terpilih: {selected_v_tune if selected_v_tune != "Latest (Default)" else "Default"}</h4>
+                <div style="display: flex; justify-content: space-between;">
+                    <div><b>Final Rows:</b> {m.get('stats', {}).get('after_algorithm1', 0):,}</div>
+                    <div><b>Features:</b> {len(m.get('selected_features', []))}</div>
+                    <div><b>Sequences:</b> {m.get('stats', {}).get('train_final', 0):,}</div>
+                </div>
+                <div style="font-size: 0.8em; color: #94a3b8; margin-top: 10px;">
+                    Fitur terpilih: {", ".join(m.get('selected_features', [])[:5])}... 
+                </div>
             </div>
-            <div style="font-size: 0.8em; color: #94a3b8; margin-top: 10px;">
-                Fitur terpilih: {", ".join(m['selected_features'][:5])}... 
-                (Lihat detail lengkap di tab <b>🔎 Data Insights</b>)
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
+        except Exception:
+            pass
+    else:
+        st.warning(f"⚠️ Dataset tidak siap di ({active_tune_dir}). Lakukan preprocessing terlebih dahulu di Feature Lab.", icon="⚠️")
 
     # --- NEW: SEARCH SPACE EDITOR & EXECUTION (Always Visible) ---
     if cfg['tuning']['enabled']:
