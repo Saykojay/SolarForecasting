@@ -497,14 +497,21 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
 
 def build_gru(lookback, n_features, forecast_horizon, hp: dict):
     """Membangun model GRU Standar."""
-    from keras.layers import Bidirectional, GRU as GRULayer
+    from keras.layers import Bidirectional, GRU as GRULayer, Reshape, Flatten
     d_model = hp.get('d_model', 64)
     n_layers = hp.get('n_layers', 2)
     dropout = hp.get('dropout', 0.2)
     use_bi = hp.get('use_bidirectional', True)
+    use_revin = hp.get('use_revin', False)
 
     inputs = Input(shape=(lookback, n_features), name='main_input')
-    x = inputs
+    
+    if use_revin:
+        revin_layer = RevIN()
+        x = revin_layer(inputs, mode='norm')
+    else:
+        x = inputs
+        
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
         layer = GRULayer(d_model, return_sequences=return_seq, dropout=dropout)
@@ -512,19 +519,35 @@ def build_gru(lookback, n_features, forecast_horizon, hp: dict):
 
     x = Dense(128, activation='relu')(x)
     x = Dropout(dropout)(x)
-    outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+    
+    if use_revin:
+        x = Dense(forecast_horizon * n_features, activation='linear')(x)
+        x = Reshape((forecast_horizon, n_features))(x)
+        x = revin_layer(x, mode='denorm')
+        x_final = Flatten()(x)
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x_final)
+    else:
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+        
     return tf.keras.Model(inputs, outputs, name='GRU_Model')
 
 def build_lstm(lookback, n_features, forecast_horizon, hp: dict):
     """Membangun model LSTM Standar."""
-    from keras.layers import Bidirectional, LSTM as LSTMLayer
+    from keras.layers import Bidirectional, LSTM as LSTMLayer, Reshape, Flatten
     d_model = hp.get('d_model', 64)
     n_layers = hp.get('n_layers', 2)
     dropout = hp.get('dropout', 0.2)
     use_bi = hp.get('use_bidirectional', True)
+    use_revin = hp.get('use_revin', False)
 
     inputs = Input(shape=(lookback, n_features), name='main_input')
-    x = inputs
+    
+    if use_revin:
+        revin_layer = RevIN()
+        x = revin_layer(inputs, mode='norm')
+    else:
+        x = inputs
+        
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
         layer = LSTMLayer(d_model, return_sequences=return_seq, dropout=dropout)
@@ -532,19 +555,35 @@ def build_lstm(lookback, n_features, forecast_horizon, hp: dict):
 
     x = Dense(128, activation='relu')(x)
     x = Dropout(dropout)(x)
-    outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+    
+    if use_revin:
+        x = Dense(forecast_horizon * n_features, activation='linear')(x)
+        x = Reshape((forecast_horizon, n_features))(x)
+        x = revin_layer(x, mode='denorm')
+        x_final = Flatten()(x)
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x_final)
+    else:
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+        
     return tf.keras.Model(inputs, outputs, name='LSTM_Model')
 
 def build_rnn(lookback, n_features, forecast_horizon, hp: dict):
     """Membangun model SimpleRNN Standar."""
-    from keras.layers import Bidirectional, SimpleRNN as RNNLayer
+    from keras.layers import Bidirectional, SimpleRNN as RNNLayer, Reshape, Flatten
     d_model = hp.get('d_model', 64)
     n_layers = hp.get('n_layers', 2)
     dropout = hp.get('dropout', 0.2)
     use_bi = hp.get('use_bidirectional', True)
+    use_revin = hp.get('use_revin', False)
 
     inputs = Input(shape=(lookback, n_features), name='main_input')
-    x = inputs
+    
+    if use_revin:
+        revin_layer = RevIN()
+        x = revin_layer(inputs, mode='norm')
+    else:
+        x = inputs
+        
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
         layer = RNNLayer(d_model, return_sequences=return_seq, dropout=dropout)
@@ -552,7 +591,16 @@ def build_rnn(lookback, n_features, forecast_horizon, hp: dict):
 
     x = Dense(128, activation='relu')(x)
     x = Dropout(dropout)(x)
-    outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+    
+    if use_revin:
+        x = Dense(forecast_horizon * n_features, activation='linear')(x)
+        x = Reshape((forecast_horizon, n_features))(x)
+        x = revin_layer(x, mode='denorm')
+        x_final = Flatten()(x)
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x_final)
+    else:
+        outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+        
     return tf.keras.Model(inputs, outputs, name='SimpleRNN_Model')
 
 def build_timeperceiver(lookback, n_features, forecast_horizon, hp: dict):

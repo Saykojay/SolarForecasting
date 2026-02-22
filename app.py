@@ -1644,7 +1644,8 @@ with tab_train:
                 with st.expander(f"🔄 {new_arch.upper()} Specific Params", expanded=True):
                     st.info(f"Input 'Hidden Units' di atas menentukan kapasitas memori per {new_arch.upper()} cell.")
                     hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=hp.get('use_bidirectional', True), key=f"bi_{new_arch}")
-                    st.caption(f"Arsitektur {new_arch.upper()} saat ini menggunakan bidirectional stack untuk menangkap konteks temporal.")
+                    hp['use_revin'] = st.checkbox("Gunakan RevIN (Reversible Instance Normalization)", value=hp.get('use_revin', False), key=f"revin_{new_arch}")
+                    st.caption(f"Arsitektur {new_arch.upper()} dapat ditambah lapisan pelindung anti-anomali RevIN.")
 
     # 2. Training Control Center
     col_ctrl1, col_ctrl2 = st.columns([2, 1])
@@ -1855,7 +1856,7 @@ with tab_batch:
                     d_label, l_label = "d_model (Patch Embed)", "Latent Attention Layers"
                 else: # gru, lstm, rnn
                     q_hp.update(base_defaults)
-                    q_hp.update({'learning_rate': 0.001, 'use_bidirectional': True})
+                    q_hp.update({'learning_rate': 0.001, 'use_bidirectional': True, 'use_revin': False})
                     d_label, l_label = f"Hidden Units ({q_arch_val.upper()})", f"Stacked {q_arch_val.upper()} Layers"
                 
                 cq1, cq2 = st.columns(2)
@@ -1912,7 +1913,11 @@ with tab_batch:
                 
                 elif q_arch_val in ["gru", "lstm", "rnn"]:
                     st.markdown("---")
-                    q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch_val}")
+                    sq1, sq2 = st.columns(2)
+                    with sq1:
+                        q_hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=q_hp.get('use_bidirectional', True), key=f"q_bi_{q_arch_val}")
+                    with sq2:
+                        q_hp['use_revin'] = st.checkbox("Gunakan RevIN", value=q_hp.get('use_revin', False), key=f"q_rev_{q_arch_val}")
             
             with st.expander(gt('config_data_feat', st.session_state.lang), expanded=False):
                 st.caption("Pilih versi data atau konfigurasi fitur")
