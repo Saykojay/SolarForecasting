@@ -658,13 +658,40 @@ def build_timeperceiver(lookback, n_features, forecast_horizon, hp: dict):
 
     return tf.keras.Model(inputs, outputs, name='TimePerceiver')
 
+def build_linear(lookback, n_features, forecast_horizon, hp: dict):
+    """Membangun model Baseline Regresi Linear."""
+    from keras.layers import Flatten
+    inputs = Input(shape=(lookback, n_features), name='main_input')
+    x = Flatten()(inputs)
+    outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+    return tf.keras.Model(inputs, outputs, name='Linear_Baseline')
+
+def build_mlp(lookback, n_features, forecast_horizon, hp: dict):
+    """Membangun model Baseline MLP (Multi-Layer Perceptron)."""
+    from keras.layers import Flatten
+    d_model = hp.get('d_model', 128)
+    n_layers = hp.get('n_layers', 2)
+    dropout = hp.get('dropout', 0.2)
+    
+    inputs = Input(shape=(lookback, n_features), name='main_input')
+    x = Flatten()(inputs)
+    
+    for _ in range(n_layers):
+        x = Dense(d_model, activation='relu')(x)
+        x = Dropout(dropout)(x)
+        
+    outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(x)
+    return tf.keras.Model(inputs, outputs, name='MLP_Baseline')
+
 MODEL_REGISTRY = {
     'patchtst': build_patchtst,
     'timetracker': build_timetracker,
     'timeperceiver': build_timeperceiver,
     'gru': build_gru,
     'lstm': build_lstm,
-    'rnn': build_rnn
+    'rnn': build_rnn,
+    'linear': build_linear,
+    'mlp': build_mlp
 }
 
 def build_model(architecture: str, lookback: int, n_features: int,

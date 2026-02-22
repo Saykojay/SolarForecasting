@@ -1547,6 +1547,11 @@ with tab_train:
                     'batch_size': 32, 'dropout': 0.1, 'patch_len': 16, 
                     'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32
                 })
+            elif new_a in ['linear', 'mlp']:
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 2, 'learning_rate': 0.001, 
+                    'batch_size': 32, 'dropout': 0.1
+                })
             else: # gru, lstm, rnn
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
@@ -1566,8 +1571,8 @@ with tab_train:
 
         with col_hp1:
             st.markdown("**Core Structure**")
-            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
-                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(arch),
+            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"], 
+                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"].index(arch),
                                   key="arch_selector_train",
                                   on_change=_update_architecture)
             
@@ -1818,7 +1823,7 @@ with tab_batch:
             st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
             
             # 1. Architecture Selection
-            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"]
             
             # Default to global active architecture if not set
             if 'batch_arch_selector' not in st.session_state:
@@ -1854,6 +1859,10 @@ with tab_batch:
                     q_hp.update(base_defaults)
                     q_hp.update({'d_model': 128, 'n_layers': 2, 'patch_len': 16, 'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32})
                     d_label, l_label = "d_model (Patch Embed)", "Latent Attention Layers"
+                elif q_arch_val in ['linear', 'mlp']:
+                    q_hp.update(base_defaults)
+                    q_hp.update({'learning_rate': 0.001, 'dropout': 0.1, 'd_model': 128, 'n_layers': 2})
+                    d_label, l_label = "Neurons (Hidden)", f"Hidden Layers ({q_arch_val.upper()})"
                 else: # gru, lstm, rnn
                     q_hp.update(base_defaults)
                     q_hp.update({'learning_rate': 0.001, 'use_bidirectional': True, 'use_revin': False})
@@ -2163,6 +2172,11 @@ with tab_tuning:
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
                 })
+            elif new_a in ['linear', 'mlp']:
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 2, 'learning_rate': 0.001, 
+                    'batch_size': 32, 'dropout': 0.1
+                })
             else:
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
@@ -2179,8 +2193,8 @@ with tab_tuning:
         if 'tune_arch_selector' not in st.session_state:
             st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
 
-        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
-                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
+        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"], 
+                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"].index(cfg['model'].get('architecture', 'patchtst').lower()),
                               key="tune_arch_selector",
                               on_change=_update_tuning_architecture)
                               
