@@ -2554,8 +2554,9 @@ with tab_tuning:
             with st.expander("Full Output"):
                 st.code(stdout_capture.getvalue(), language="text")
         except Exception as e:
-            st.error(f"Error: {e}")
-        st.rerun()
+            import traceback
+            st.error(f"Error saat eksekusi Tuning: {str(e)}")
+            st.code(traceback.format_exc(), language="python")
 
 
 # --- TAB: EVALUATION RESULTS ---
