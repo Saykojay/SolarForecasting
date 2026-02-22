@@ -590,11 +590,12 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ============================================================
 # TABS
 # ============================================================
-tab_data, tab_prep_features, tab_train, tab_batch, tab_tuning, tab_eval, tab_compare, tab_transfer, tab_troubleshoot = st.tabs([
+tab_data, tab_prep_features, tab_train, tab_batch, tab_baseline, tab_tuning, tab_eval, tab_compare, tab_transfer, tab_troubleshoot = st.tabs([
     gt('data_insights', st.session_state.lang),
     gt('data_prep', st.session_state.lang),
     gt('training_center', st.session_state.lang),
     gt('batch_experiments', st.session_state.lang),
+    "🏛️ Baseline & Physics",
     gt('optuna_tuning', st.session_state.lang),
     gt('prediction_eval', st.session_state.lang),
     gt('leaderboard', st.session_state.lang),
@@ -1547,11 +1548,6 @@ with tab_train:
                     'batch_size': 32, 'dropout': 0.1, 'patch_len': 16, 
                     'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32
                 })
-            elif new_a in ['linear', 'mlp']:
-                cfg['model']['hyperparameters'].update({
-                    'd_model': 128, 'n_layers': 2, 'learning_rate': 0.001, 
-                    'batch_size': 32, 'dropout': 0.1
-                })
             else: # gru, lstm, rnn
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
@@ -1571,8 +1567,8 @@ with tab_train:
 
         with col_hp1:
             st.markdown("**Core Structure**")
-            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"], 
-                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"].index(arch),
+            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
+                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(arch),
                                   key="arch_selector_train",
                                   on_change=_update_architecture)
             
@@ -1823,7 +1819,7 @@ with tab_batch:
             st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
             
             # 1. Architecture Selection
-            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"]
+            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
             
             # Default to global active architecture if not set
             if 'batch_arch_selector' not in st.session_state:
@@ -1859,10 +1855,6 @@ with tab_batch:
                     q_hp.update(base_defaults)
                     q_hp.update({'d_model': 128, 'n_layers': 2, 'patch_len': 16, 'stride': 8, 'n_heads': 8, 'n_latent_tokens': 32})
                     d_label, l_label = "d_model (Patch Embed)", "Latent Attention Layers"
-                elif q_arch_val in ['linear', 'mlp']:
-                    q_hp.update(base_defaults)
-                    q_hp.update({'learning_rate': 0.001, 'dropout': 0.1, 'd_model': 128, 'n_layers': 2})
-                    d_label, l_label = "Neurons (Hidden)", f"Hidden Layers ({q_arch_val.upper()})"
                 else: # gru, lstm, rnn
                     q_hp.update(base_defaults)
                     q_hp.update({'learning_rate': 0.001, 'use_bidirectional': True, 'use_revin': False})
@@ -2089,6 +2081,98 @@ with tab_batch:
         import traceback
         st.code(traceback.format_exc())
 
+# --- TAB BASELINE & PHYSICS ---
+with tab_baseline:
+    st.markdown("### 🏛️ Baseline & Physics Experiments")
+    st.markdown("Uji dan set benchmark menggunakan algoritma klasik atau pure-physics models (PVWatts/Single Diode) tanpa Deep Learning.")
+    
+    st.info("Algoritma ini jauh lebih cepat divalidasi dan akan menjadi patokan 'Minimum Viable Performance' untuk ditaklukkan oleh Deep Learning.")
+    
+    c_b1, c_b2 = st.columns([1, 1])
+    
+    with c_b1:
+        baseline_group = st.selectbox("Pilih Kategori Baseline", ["Classical Machine Learning", "Physics Models (PVLib)"])
+        
+        if baseline_group == "Classical Machine Learning":
+            b_model = st.selectbox("Pilih Algoritma", ["Linear Regression", "Ridge Regression", "Random Forest"])
+        else:
+            b_model = st.selectbox("Pilih Model Fisika", ["PVWatts", "Single Diode (SAPM)"])
+            
+    with c_b2:
+        st.markdown("**Pemilihan Data**")
+        proc_dir = cfg['paths'].get('processed_dir', 'data/processed')
+        versions = []
+        if os.path.exists(proc_dir):
+            versions = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
+            versions.sort(key=lambda x: os.path.getmtime(os.path.join(proc_dir, x)), reverse=True)
+            
+        b_data_opts = ["Latest (Default)"] + versions
+        b_data_sel = st.selectbox("Versi Data Uji:", b_data_opts, format_func=lambda x: label_format_with_time(x, proc_dir) if x != "Latest (Default)" else x)
+        
+        active_b_dir = proc_dir if b_data_sel == "Latest (Default)" else os.path.join(proc_dir, b_data_sel)
+        
+        if baseline_group == "Physics Models (PVLib)":
+            b_capacity = st.number_input("PV Capacity (kWDC)", value=1000, step=100, min_value=10)
+    
+    st.markdown("---")
+    if st.button(f"🏁 Jalankan Evaluasi {b_model}", type="primary", use_container_width=True):
+        if not os.path.exists(os.path.join(active_b_dir, 'X_train.npy')) and baseline_group == "Classical Machine Learning":
+            st.error("Data X_train.npy tidak ditemukan. Buat dataset di tab Feature Lab.")
+        elif not os.path.exists(os.path.join(active_b_dir, 'df_test_feats.pkl')) and baseline_group == "Physics Models (PVLib)":
+             st.error("Data df_test_feats.pkl tidak ditemukan.")
+        else:
+            with st.spinner(f"Menjalankan {b_model}..."):
+                from src.baseline_models import evaluate_ml_baseline, evaluate_physics_baseline
+                try:
+                    if baseline_group == "Classical Machine Learning":
+                        X_train = np.load(os.path.join(active_b_dir, 'X_train.npy'))
+                        y_train = np.load(os.path.join(active_b_dir, 'y_train.npy'))
+                        X_test = np.load(os.path.join(active_b_dir, 'X_test.npy'))
+                        y_test = np.load(os.path.join(active_b_dir, 'y_test.npy'))
+                        
+                        y_scaler_path = os.path.join(active_b_dir, 'y_scaler.pkl')
+                        if not os.path.exists(y_scaler_path):
+                            y_scaler_path = os.path.join(proc_dir, 'y_scaler.pkl')
+                            
+                        y_scaler = joblib.load(y_scaler_path) if os.path.exists(y_scaler_path) else None
+                        
+                        res = evaluate_ml_baseline(b_model, X_train, y_train, X_test, y_test, y_scaler=y_scaler)
+                    else:
+                        df_test = pd.read_pickle(os.path.join(active_b_dir, 'df_test_feats.pkl'))
+                        res = evaluate_physics_baseline(b_model, df_test, capacity_kw=b_capacity)
+                    
+                    st.success("Evaluasi Selesai!")
+                    
+                    rc1, rc2, rc3 = st.columns(3)
+                    rc1.metric("R² Score", f"{res['metrics']['R²']:.4f}")
+                    rc2.metric("MAE", f"{res['metrics']['MAE']:.4f}")
+                    rc3.metric("RMSE", f"{res['metrics']['RMSE']:.4f}")
+                    st.info(f"⏱️ Waktu Latih/Eksekusi: {res['train_time']:.2f} detik")
+                    
+                    import plotly.graph_objects as go
+                    try:
+                        act = res['y_actual'].flatten() if res['y_actual'] is not None else []
+                        prd = res['y_pred'].flatten()
+                        
+                        # Ambil 500 sampel terakhir maksimal
+                        viz_limit = 500
+                        if len(act) > viz_limit:
+                            act = act[-viz_limit:]
+                            prd = prd[-viz_limit:]
+                            
+                        fig = go.Figure()
+                        if len(act) > 0:
+                            fig.add_trace(go.Scatter(y=act, mode='lines', name='Actual', line=dict(color='gray', dash='dot')))
+                        fig.add_trace(go.Scatter(y=prd, mode='lines', name=f'Predicted ({b_model})', line=dict(color='cyan')))
+                        fig.update_layout(title="Grafik Cuplikan Prediksi vs Aktual", template="plotly_dark", height=400)
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Gagal me-render chart: {e}")
+                        
+                except Exception as e:
+                    import traceback
+                    st.error(f"Gagal Evaluasi: {e}")
+                    st.code(traceback.format_exc(), language="python")
 
 # --- TAB TUNING: TUNING MONITOR ---
 with tab_tuning:
@@ -2172,11 +2256,6 @@ with tab_tuning:
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
                 })
-            elif new_a in ['linear', 'mlp']:
-                cfg['model']['hyperparameters'].update({
-                    'd_model': 128, 'n_layers': 2, 'learning_rate': 0.001, 
-                    'batch_size': 32, 'dropout': 0.1
-                })
             else:
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
@@ -2193,8 +2272,8 @@ with tab_tuning:
         if 'tune_arch_selector' not in st.session_state:
             st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
 
-        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"], 
-                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn", "linear", "mlp"].index(cfg['model'].get('architecture', 'patchtst').lower()),
+        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
+                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
                               key="tune_arch_selector",
                               on_change=_update_tuning_architecture)
                               
