@@ -2391,7 +2391,7 @@ with tab_tuning:
             _opt_loss = ['mse', 'huber', 'mae']
             tune_loss_fn = st.selectbox("Loss Function", _opt_loss, index=_opt_loss.index(cfg['model']['hyperparameters'].get('loss_fn', 'mse')) if cfg['model']['hyperparameters'].get('loss_fn') in _opt_loss else 0, key="tune_loss_fn")
         with tune_col_d2:
-            run_tune = st.button("🔥 Jalankan Optuna Tuning", type="primary", width="stretch", 
+            run_tune_bottom = st.button("🔥 Jalankan Optuna Tuning", type="primary", width="stretch", 
                                   disabled=not has_data, key="btn_tune_tab")
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2463,7 +2463,8 @@ with tab_tuning:
             st.info("Tuning memungkinkan sistem mencari arsitektur terbaik secara otomatis untuk mencapai R² yang lebih tinggi.")
 
     # --- EXECUTION LOGIC FOR TUNING ---
-    if 'run_tune' in locals() and run_tune:
+    is_run_tune = locals().get('run_tune', False) or locals().get('run_tune_bottom', False)
+    if is_run_tune:
         st.markdown("### 🔍 Live Tuning Monitor")
         
         # Placeholders for real-time updates
