@@ -177,6 +177,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
+    from optuna.integration import TFKerasPruningCallback
     import mlflow
     from src.model_factory import build_model, compile_model
     from src.data_prep import create_sequences_with_indices
@@ -279,12 +280,15 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                 model = build_model(arch, actual_lookback, n_features, horizon, hp)
 
         compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
-        early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        # Increase patience to 10 to give models more time to converge or plateu before dropping
+        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        # Add TFKerasPruningCallback to cut off unpromising trials in the middle of training (based on SuccessiveHalving)
+        pruning_cb = TFKerasPruningCallback(trial, 'val_loss')
 
         history = model.fit(
             X_tr, y_tr, validation_data=(X_va, y_va),
-            epochs=50, batch_size=hp['batch_size'],
-            callbacks=[early_stop], verbose=0
+            epochs=100, batch_size=hp['batch_size'],
+            callbacks=[early_stop, pruning_cb], verbose=0
         )
 
         val_loss = min(history.history['val_loss'])
@@ -300,10 +304,14 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
 
     print("=" * 70)
-    print("RUNNING HYPERPARAMETER TUNING (Optuna)")
+    print("RUNNING HYPERPARAMETER TUNING (Optuna with Pruning)")
     print("=" * 70)
 
-    study = optuna.create_study(direction='minimize')
+    # Implement SuccessiveHalvingPruner
+    # min_resource: epoch minimum sebelum pruning dipertimbangkan (10 epoch)
+    # reduction_factor: factor pembagian trial tiap iterasi
+    pruner = optuna.pruners.SuccessiveHalvingPruner(min_resource=10, reduction_factor=4)
+    study = optuna.create_study(direction='minimize', pruner=pruner)
     study.optimize(objective, n_trials=cfg['tuning']['n_trials'], 
                    show_progress_bar=True, callbacks=extra_callbacks)
 
