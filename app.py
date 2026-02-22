@@ -2183,6 +2183,9 @@ with tab_tuning:
                               index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
                               key="tune_arch_selector",
                               on_change=_update_tuning_architecture)
+                              
+        n_trials_input = st.number_input("🎯 Jumlah Trials Optuna", min_value=1, max_value=5000, value=cfg['tuning'].get('n_trials', 50), step=10, 
+                                        help="Semakin banyak trial, semakin lama diproses, tapi optuna memiliki peluang lebih besar untuk menemukan parameter konvergen terbaik.")
         
         with st.expander("🛠️ Edit Search Space Hyperparameters", expanded=False):
             st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
@@ -2261,8 +2264,9 @@ with tab_tuning:
 
             if st.button("💾 Save Search Space to Master Config", width="stretch", key="save_ss_tuning"):
                 cfg['tuning']['search_space'] = space
+                cfg['tuning']['n_trials'] = n_trials_input
                 save_config_to_file(cfg)
-                st.success("Search space berhasil disimpan ke config.yaml!")
+                st.success(f"Search space & ({n_trials_input} Trials) berhasil disimpan ke config.yaml!")
 
         # Device Selector for Tuning
         tune_col_dev1, tune_col_loss, tune_col_dev2 = st.columns([1, 1, 2])
