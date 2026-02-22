@@ -2109,22 +2109,20 @@ with tab_tuning:
 
     # Added: Data Selection and Mini Analytics inside Tuning Tab for immediate feedback
     st.markdown("**📂 Pilih Versi Dataset untuk Tuning**")
-    proc_dir = cfg['paths']['processed_dir']
-    base_dir = os.path.dirname(proc_dir) 
     
     versions = []
-    if os.path.exists(base_dir):
-        versions = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d)) and d.startswith("processed_")]
-        versions.sort(key=lambda x: os.path.getmtime(os.path.join(base_dir, x)), reverse=True)
+    if os.path.exists(proc_dir):
+        versions = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and d.startswith("processed_")]
+        versions.sort(key=lambda x: os.path.getmtime(os.path.join(proc_dir, x)), reverse=True)
     options = ["Latest (Default)"] + versions
     
     selected_v_tune = st.selectbox("Gunakan Versi Data untuk Tuning:", options, index=0, key="data_version_tune",
-                           format_func=lambda x: label_format_with_time(x, base_dir) if x != "Latest (Default)" else x)
+                           format_func=lambda x: label_format_with_time(x, proc_dir) if x != "Latest (Default)" else x)
                            
     if selected_v_tune == "Latest (Default)":
         active_tune_dir = proc_dir
     else:
-        active_tune_dir = os.path.join(base_dir, selected_v_tune)
+        active_tune_dir = os.path.join(proc_dir, selected_v_tune)
         
     cfg['paths']['processed_dir'] = active_tune_dir
     has_data = os.path.exists(os.path.join(active_tune_dir, 'X_train.npy'))
