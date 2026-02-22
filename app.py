@@ -2112,7 +2112,7 @@ with tab_tuning:
     
     versions = []
     if os.path.exists(proc_dir):
-        versions = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and d.startswith("processed_")]
+        versions = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
         versions.sort(key=lambda x: os.path.getmtime(os.path.join(proc_dir, x)), reverse=True)
     options = ["Latest (Default)"] + versions
     
