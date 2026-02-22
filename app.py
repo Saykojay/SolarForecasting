@@ -1567,8 +1567,9 @@ with tab_train:
 
         with col_hp1:
             st.markdown("**Core Structure**")
-            _dummy = st.selectbox("Arsitektur Model", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
-                                  index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(arch),
+            _valid_archs = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+            _dummy = st.selectbox("Arsitektur Model", _valid_archs, 
+                                  index=_valid_archs.index(arch) if arch in _valid_archs else 0,
                                   key="arch_selector_train",
                                   on_change=_update_architecture)
             
@@ -2272,8 +2273,10 @@ with tab_tuning:
         if 'tune_arch_selector' not in st.session_state:
             st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
 
-        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"], 
-                              index=["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"].index(cfg['model'].get('architecture', 'patchtst').lower()),
+        _valid_tune_archs = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+        _current_tune_arch = cfg['model'].get('architecture', 'patchtst').lower()
+        t_arch = st.selectbox("Arsitektur yang akan di-Tuning", _valid_tune_archs, 
+                              index=_valid_tune_archs.index(_current_tune_arch) if _current_tune_arch in _valid_tune_archs else 0,
                               key="tune_arch_selector",
                               on_change=_update_tuning_architecture)
                               
