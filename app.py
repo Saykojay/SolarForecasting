@@ -2265,11 +2265,14 @@ with tab_tuning:
                 st.success("Search space berhasil disimpan ke config.yaml!")
 
         # Device Selector for Tuning
-        tune_col_dev1, tune_col_dev2 = st.columns([1, 2])
+        tune_col_dev1, tune_col_loss, tune_col_dev2 = st.columns([1, 1, 2])
         with tune_col_dev1:
             tune_device = st.radio("🖥️ Device untuk Tuning", ["CPU", "GPU"], index=0, 
                                    horizontal=True, key="tune_device_top",
                                    help="CPU direkomendasikan untuk menghindari OOM error pada GPU dengan VRAM terbatas.")
+        with tune_col_loss:
+            _opt_loss = ['mse', 'huber', 'mae']
+            tune_loss_fn = st.selectbox("Loss Function", _opt_loss, index=_opt_loss.index(cfg['model']['hyperparameters'].get('loss_fn', 'mse')) if cfg['model']['hyperparameters'].get('loss_fn') in _opt_loss else 0, key="tune_loss_fn_top")
         with tune_col_dev2:
             run_tune = st.button("🔥 Jalankan Optuna Tuning Baru", type="primary", width="stretch", 
                                   disabled=not has_data, key="btn_tune_execute")
