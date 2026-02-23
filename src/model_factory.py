@@ -274,6 +274,100 @@ class TimeTrackerBlock(tf.keras.layers.Layer):
         })
         return config
 
+# ============================================================
+# AUTOFORMER CUSTOM LAYERS
+# ============================================================
+class SeriesDecomposition(tf.keras.layers.Layer):
+    """Series Decomposition Block (Trend & Seasonal separation) from Autoformer."""
+    def __init__(self, kernel_size=25, **kwargs):
+        super().__init__(**kwargs)
+        self.kernel_size = kernel_size
+        self.avg_pool = tf.keras.layers.AveragePooling1D(
+            pool_size=kernel_size, strides=1, padding='same'
+        )
+
+    def call(self, x):
+        # x is (Batch, SeqLen, D)
+        moving_mean = self.avg_pool(x)
+        res = x - moving_mean
+        # Check lengths, as average pooling 'same' padding keeps lengths identical 
+        return res, moving_mean
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"kernel_size": self.kernel_size})
+        return config
+
+class AutoCorrelationMechanism(tf.keras.layers.Layer):
+    """Auto-Correlation Mechanism to replace Self-Attention in Autoformer."""
+    def __init__(self, d_model, c_out, factor=1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.c_out = c_out
+        self.factor = factor
+        self.Wq = Dense(d_model)
+        self.Wk = Dense(d_model)
+        self.Wv = Dense(d_model)
+        self.out_proj = Dense(c_out)
+
+    def call(self, queries, keys, values):
+        B = tf.shape(queries)[0]
+        L = tf.shape(queries)[1]
+        Q = self.Wq(queries)
+        K = self.Wk(keys)
+        V = self.Wv(values)
+        
+        # Simplified Auto-Correlation (dense approximation context for stability in Keras without FFT wrapper constraints)
+        corr_logits = tf.matmul(Q, K, transpose_b=True) / tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+        attn_weights = tf.nn.softmax(corr_logits, axis=-1)
+        out = tf.matmul(attn_weights, V)
+        return self.out_proj(out)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"d_model": self.d_model, "c_out": self.c_out, "factor": self.factor})
+        return config
+
+class AutoformerEncoderBlock(tf.keras.layers.Layer):
+    """Encoder Block for Autoformer."""
+    def __init__(self, d_model, c_out, ff_dim, moving_avg=25, dropout=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = d_model
+        self.c_out = c_out
+        self.ff_dim = ff_dim
+        self.moving_avg = moving_avg
+        self.dropout_rate = dropout
+        
+        self.auto_corr = AutoCorrelationMechanism(d_model, c_out)
+        self.decomp1 = SeriesDecomposition(moving_avg)
+        self.decomp2 = SeriesDecomposition(moving_avg)
+        self.ffn = tf.keras.Sequential([
+            Dense(ff_dim, activation='gelu'),
+            Dense(d_model),
+            Dropout(dropout)
+        ])
+        self.dropout1 = Dropout(dropout)
+
+    def call(self, x, training=False):
+        # Auto-correlation
+        x_attn = self.auto_corr(x, x, x)
+        x = x + self.dropout1(x_attn, training=training)
+        # Decomposition 1
+        x, _ = self.decomp1(x)
+        # FFN
+        x_ffn = self.ffn(x, training=training)
+        x = x + x_ffn
+        # Decomposition 2
+        x, _ = self.decomp2(x)
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "d_model": self.d_model, "c_out": self.c_out, "ff_dim": self.ff_dim,
+            "moving_avg": self.moving_avg, "dropout": self.dropout_rate
+        })
+        return config
 class CrossAttentionBlock(tf.keras.layers.Layer):
     """Attention Block (U, Z) -> U attends to context Z."""
     def __init__(self, d_model, n_heads, ff_dim, dropout=0.1, **kwargs):
@@ -529,6 +623,49 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
 
     return tf.keras.Model(inputs, outputs, name='PatchTST_Faithful')
 
+def build_autoformer(lookback, n_features, forecast_horizon, hp: dict):
+    """
+    Autoformer Implementation (Encoder-Decoder with Series Decomposition).
+    """
+    d_model = hp.get('d_model', 64)
+    n_layers = hp.get('n_layers', 2)
+    dropout = hp.get('dropout', 0.1)
+    ff_dim = hp.get('ff_dim', d_model * 2)
+    moving_avg = hp.get('moving_avg', 25) # Standard Autoformer kernel size
+
+    inputs = Input(shape=(lookback, n_features), name='main_input')
+    
+    # 1. Decomposition of Input
+    decomp = SeriesDecomposition(moving_avg)
+    season_init, trend_init = decomp(inputs)
+    
+    # 2. Embedding (Data -> d_model)
+    # For Autoformer we typically use simple linear projection as embedder
+    ent_embed = Dense(d_model)(season_init)
+    
+    # 3. Encoder (Processes Seasonal part only)
+    enc_out = ent_embed
+    for i in range(n_layers):
+        enc_out = AutoformerEncoderBlock(
+            d_model, d_model, ff_dim, moving_avg, dropout, name=f'autoformer_enc_{i}'
+        )(enc_out)
+        
+    # 4. Decoder / Output Head (Simplified Decoder logic without cross-attn for speed)
+    # The true Autoformer uses a complex cross-correlation decoder.
+    # We flatten the robust seasonal representation and add the trend component.
+    z_season = Flatten()(enc_out)
+    z_trend = Flatten()(trend_init)
+    
+    # Predict future seasonality
+    pred_season = Dense(forecast_horizon, activation='linear')(z_season)
+    # Predict future trend
+    pred_trend = Dense(forecast_horizon, activation='linear')(z_trend)
+    
+    # Autoformer finale: Y_predict = Y_season + Y_trend
+    outputs = tf.keras.layers.Add(name='output_layer')([pred_season, pred_trend])
+
+    return tf.keras.Model(inputs, outputs, name='Autoformer')
+
 def build_gru(lookback, n_features, forecast_horizon, hp: dict):
     """Membangun model GRU Standar."""
     from keras.layers import Bidirectional, GRU as GRULayer, Reshape, Flatten
@@ -722,6 +859,7 @@ def build_mlp(lookback, n_features, forecast_horizon, hp: dict):
 MODEL_REGISTRY = {
     'patchtst': build_patchtst,
     'timetracker': build_timetracker,
+    'autoformer': build_autoformer,
     'timeperceiver': build_timeperceiver,
     'gru': build_gru,
     'lstm': build_lstm,
@@ -750,6 +888,9 @@ def get_custom_objects():
         'TransformerEncoderBlock': TransformerEncoderBlock,
         'MoELayer': MoELayer,
         'TimeTrackerBlock': TimeTrackerBlock,
+        'SeriesDecomposition': SeriesDecomposition,
+        'AutoCorrelationMechanism': AutoCorrelationMechanism,
+        'AutoformerEncoderBlock': AutoformerEncoderBlock,
         'CrossAttentionBlock': CrossAttentionBlock,
         'LatentBottleneckEncoder': LatentBottleneckEncoder,
         'TimePerceiverDecoder': TimePerceiverDecoder,

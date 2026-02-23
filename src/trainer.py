@@ -400,8 +400,25 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                 valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
                 hp['n_heads'] = max(valid_heads) if valid_heads else max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
 
+        elif arch == 'autoformer':
+            if 'd_model' in space:
+                hp['d_model'] = trial.suggest_categorical('d_model', [2**i for i in range(int(np.log2(space['d_model'][0])), int(np.log2(space['d_model'][1]))+1)])
+            if 'n_layers' in space:
+                hp['n_layers'] = trial.suggest_int('n_layers', space['n_layers'][0], space['n_layers'][1])
+            if 'ff_dim' in space:
+                hp['ff_dim'] = trial.suggest_categorical('ff_dim', [2**i for i in range(int(np.log2(space['ff_dim'][0])), int(np.log2(space['ff_dim'][1]))+1)])
+            if 'moving_avg' in space:
+                hp['moving_avg'] = trial.suggest_int('moving_avg', space['moving_avg'][0], space['moving_avg'][1], step=space['moving_avg'][2] if len(space['moving_avg']) > 2 else 2)
+            else:
+                hp['moving_avg'] = 25
+
+            # constraints
+            hp['moving_avg'] = min(hp['moving_avg'], hp['lookback'])
+            if hp['moving_avg'] % 2 == 0:
+                hp['moving_avg'] += 1 # Autoformer kernel must be odd
+
         else:
-            # For non-PatchTST/TimeTracker models like GRU/LSTM/RNN, preserve specific params from cfg
+            # For non-PatchTST/TimeTracker/Autoformer models like GRU/LSTM/RNN, preserve specific params from cfg
             if 'use_bidirectional' in cfg['model']['hyperparameters']:
                 hp['use_bidirectional'] = cfg['model']['hyperparameters']['use_bidirectional']
             if 'use_revin' in cfg['model']['hyperparameters']:

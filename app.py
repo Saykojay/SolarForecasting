@@ -2329,7 +2329,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "timetracker"]:
+                if t_arch in ["patchtst", "timetracker", "autoformer"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
@@ -2349,10 +2349,10 @@ with tab_tuning:
 
             with col_s2:
                 # Dynamic Search Space Labels
-                ss_d_label = "D_Model (Embedding)" if cfg['model']['architecture'] == 'patchtst' else f"Hidden Units ({cfg['model']['architecture'].upper()} Capacity)"
-                ss_l_label = "Layers (Transformer)" if cfg['model']['architecture'] == 'patchtst' else f"Layers (Stacked {cfg['model']['architecture'].upper()})"
+                ss_d_label = "D_Model (Embedding)" if t_arch in ['patchtst', 'autoformer', 'timetracker'] else f"Hidden Units ({t_arch.upper()} Capacity)"
+                ss_l_label = "Layers (Transformer)" if t_arch in ['patchtst', 'autoformer', 'timetracker'] else f"Layers (Stacked {t_arch.upper()})"
                 
-                st.markdown(f"**2. {cfg['model']['architecture'].upper()} Capacity**")
+                st.markdown(f"**2. {t_arch.upper()} Capacity**")
                 d_vals = space.get('d_model', [64, 256])
                 d_min = st.number_input(f"{ss_d_label} Min", 4, 512, d_vals[0], 4, key="d_min_new")
                 d_max = st.number_input(f"{ss_d_label} Max", d_min, 1024, d_vals[1], 4, key="d_max_new")
@@ -2390,6 +2390,17 @@ with tab_tuning:
                     tk_min = st.number_input("Top-K Min", 1, 8, tk_vals[0], 1, key="tk_min_new")
                     tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key="tk_max_new")
                     space['top_k'] = [tk_min, tk_max]
+
+                if t_arch == "autoformer":
+                    ff_vals = space.get('ff_dim', [128, 512])
+                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="af_ff_min")
+                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="af_ff_max")
+                    space['ff_dim'] = [ff_min, ff_max]
+                    
+                    ma_vals = space.get('moving_avg', [25, 25])
+                    ma_min = st.number_input("Moving Avg Min", 1, 65, ma_vals[0], 2, key="ma_min_new")
+                    ma_max = st.number_input("Moving Avg Max", ma_min, 65, ma_vals[1], 2, key="ma_max_new")
+                    space['moving_avg'] = [ma_min, ma_max]
 
                 dr_vals = space.get('dropout', [0.05, 0.3])
                 dr_min = st.number_input("Dropout Min", 0.0, 0.5, dr_vals[0], 0.05, key="dr_min_new")
