@@ -19,18 +19,18 @@ Berdasarkan konsensus komunitas peneliti *Machine Learning*, berikut adalah pand
 
 ---
 
-## 💡 Strategi Eksekusi: "Mode Sniper" (Budget 20 Trials)
+## 💡 Strategi Eksekusi: "Mode Ekstensif" (Budget 100 Trials)
 
-Jika Anda memiliki batasan komputasi GPU / komersial dan hanya dapat menjalankan Optuna selama **20 kali percobaan (Trials)**, Anda wajib menyempitkan radar saringan (*Search Space*) sekuat mungkin untuk membantu TPE menemukan bongkahan emas.
+Dengan _budget_ **100 kali percobaan (Trials)** yang sangat leluasa dan didukung oleh komputasi GPU A5000, Anda bisa membiarkan mesin menjelajahi seluruh lautan probabilitas (Eksplorasi) sebelum ia menukik tajam (Eksploitasi). TPE akan punya cukup bensin untuk secara matematis membuktikan hipotesis parameter-parameter eksotik.
 
-Gunakan *konfigurasi ekstrem* ini di UI Streamlit Anda:
+Gunakan *konfigurasi ekstensif* ini di UI Streamlit Anda:
 
 1. **Arsitektur:** `lstm`
-2. **Lapisan (Layers):** Min `1` — Max `2` *(Cukup uji 1 dan 2 lapis, buang lapis 3)*.
-3. **Unit Terdalam (d_model):** Min `32` — Max `64` — Step `32` *(Memaksa Optuna hanya memilih 32 atau 64)*.
-4. **Jendela Masa Lalu (lookback):** Min `24` — Max `72` — Step `24` *(Hanya uji kekuatan ramal mundur 1, 2, atau 3 hari)*.
+2. **Lapisan (Layers):** Min `1` — Max `3` *(Beri Optuna ruang untuk membuktikan bahwa 3 lapis bisa jadi jebakan, atau malah jackpot).*
+3. **Unit Terdalam (d_model):** Min `16` — Max `128` — Step `16` *(Optuna akan menjelajahi ruang arsitektur langsing hingga gemuk).*
+4. **Jendela Masa Lalu (lookback):** Min `24` — Max `168` — Step `24` *(Optuna akan menguji apakah menengok ke seminggu penuh ke belakang berguna bagi LSTM atau justru membuatnya "bingung").*
 
-**Mengapa Menyempitkan Seperti Ini?**
-Algoritma TPE *(Tree-structured Parzen Estimator)* berkerja dengan mengarahkan probabilitas uji coba ke area yang secara historis memberikan hasil *Loss/Error* terkecil. Dengan menyuguhkan "Pilihan Menu" yang sempit berisi angka-angka jagoan saja, Anda menghemat 15 *Trials* pertama yang biasanya dihabiskan Optuna untuk belajar angka-angka ekstrem yang pasti gagal (*seperti hidden size 512 atau lookback 336*). 
+**Mengapa Melebarkan Rentang Seperti Ini?**
+Dengan 100 *Trials*, Optuna TPE memiliki modal yang cukup untuk melakukan *Random Exploration* di 20-30 eksekusi pertama. Setelah ia memetakan area mana yang sukses (rendah eror) dan mana yang hancur berantakan (*vanishing gradient* di >128 _hidden units_ atau lapis ke-3), ia akan menggunakan sisa 70 trial fokus mengoptimasi angka yang menjanjikan.
 
-Dalam "Mode Sniper" ini, hampir 95% dari ke-20 model mutan hasil racikan mesin pencari Anda akan menghasilkan garis grafik valid yang kompetitif melawan model Baseline Linear Regression.
+Dalam "Mode Ekstensif" ini, hasil grafik paralel (*Parallel Coordinate Plot*) Optuna Anda akan terlihat sangat menakjubkan, menunjukkan evolusi kecerdasan buatan dari tebakan kasar (fase Eksplorasi) yang bergeser pelan-pelan ke area "Juara Mutlak" di 50 trial terakhir (fase Eksploitasi).
