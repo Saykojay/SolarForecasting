@@ -106,14 +106,77 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     import sys
     sys.stdout.flush()
 
-    history = model.fit(
-        data['X_train'], data['y_train'],
-        validation_data=(data['X_test'], data['y_test']),
-        epochs=cfg['training']['epochs'],
-        batch_size=hp['batch_size'],
-        callbacks=cbs,
-        verbose=2 # One line per epoch is more stable for CMD logging
-    )
+    use_batch_scheduling = cfg['training'].get('use_batch_scheduling', False)
+    total_epochs = cfg['training']['epochs']
+    init_batch_size = hp['batch_size']
+    
+    if use_batch_scheduling:
+        print(f"\n📈 [Taktik 3] Batch Size Scheduling diaktifkan. Start Batch: {init_batch_size}")
+        import copy
+        from keras.callbacks import History
+        
+        full_history = History()
+        full_history.history = {}
+        
+        p1_epochs = int(total_epochs * 0.4)
+        p2_epochs = int(total_epochs * 0.3)
+        p3_epochs = total_epochs - p1_epochs - p2_epochs
+        
+        max_bs = cfg['training'].get('max_batch_size', 512)
+        phases = [
+            {'epochs': p1_epochs, 'batch_size': min(init_batch_size, max_bs)},
+            {'epochs': p2_epochs, 'batch_size': min(init_batch_size * 2, max_bs)},
+            {'epochs': p3_epochs, 'batch_size': min(init_batch_size * 4, max_bs)}
+        ]
+        
+        current_epoch = 0
+        early_stopped = False
+        
+        for i, phase in enumerate(phases):
+            p_epochs = phase['epochs']
+            if p_epochs <= 0 or early_stopped:
+                break
+                
+            p_bs = phase['batch_size']
+            print(f"   [Phase {i+1}] Training for {p_epochs} epochs with Batch Size: {p_bs}")
+            sys.stdout.flush()
+            
+            h = model.fit(
+                data['X_train'], data['y_train'],
+                validation_data=(data['X_test'], data['y_test']),
+                initial_epoch=current_epoch,
+                epochs=current_epoch + p_epochs,
+                batch_size=p_bs,
+                callbacks=cbs,
+                verbose=2
+            )
+            
+            # Merge history
+            for k, v in h.history.items():
+                if k not in full_history.history:
+                    full_history.history[k] = []
+                full_history.history[k].extend(v)
+                
+            current_epoch += p_epochs
+            
+            for cb in cbs:
+                if hasattr(cb, 'stopped_epoch') and getattr(cb, 'stopped_epoch', 0) > 0:
+                    early_stopped = True
+                    print(f"   [Early Stop] Triggered in Phase {i+1}")
+                    break
+                    
+        history = full_history
+        history.model = model
+        history.params = {'epochs': total_epochs}
+    else:
+        history = model.fit(
+            data['X_train'], data['y_train'],
+            validation_data=(data['X_test'], data['y_test']),
+            epochs=total_epochs,
+            batch_size=init_batch_size,
+            callbacks=cbs,
+            verbose=2 # One line per epoch is more stable for CMD logging
+        )
     
     end_time = time.time()
     training_duration = end_time - start_time
@@ -312,6 +375,14 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
         X_full = data['X_train']
         y_full = data['y_train']
 
+        # --- TACTIC 1: DATA SUBSAMPLING ---
+        if cfg['tuning'].get('use_subsampling', False):
+            ratio = cfg['tuning'].get('subsample_ratio', 0.20)
+            subset_len = max(100, int(len(X_full) * ratio))
+            # Mengambil data terbaru (dari ujung belakang dataset) mempertahankan integritas urutan waktu
+            X_full = X_full[-subset_len:]
+            y_full = y_full[-subset_len:]
+
         # If lookback changed, we need to re-sequence... but X_train is already sequenced.
         # For simplicity, we do an inner train/val split on the existing sequences.
         n_train = int(0.8 * len(X_full))
@@ -352,6 +423,13 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
         except Exception as e:
             print(f"⚠️ MLflow logging failed (ignoring): {e}")
 
+        # --- Aggressive Final Memory Cleanup ---
+        del model
+        del history
+        tf.keras.backend.clear_session()
+        for _ in range(3):
+            gc.collect()
+
         return val_loss
 
 
@@ -363,7 +441,13 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
     # min_resource: epoch minimum sebelum pruning dipertimbangkan (10 epoch)
     # reduction_factor: factor pembagian trial tiap iterasi
     pruner = optuna.pruners.SuccessiveHalvingPruner(min_resource=10, reduction_factor=4)
-    study = optuna.create_study(direction='minimize', pruner=pruner)
+    study = optuna.create_study(
+        study_name=f'tuning_{cfg["model"]["architecture"]}', 
+        storage='sqlite:///optuna_history.db', 
+        load_if_exists=True,
+        direction='minimize', 
+        pruner=pruner
+    )
     study.optimize(objective, n_trials=cfg['tuning']['n_trials'], 
                    show_progress_bar=True, callbacks=extra_callbacks)
 

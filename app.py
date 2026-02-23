@@ -1106,17 +1106,19 @@ with tab_eval:
                 import tensorflow as tf
                 
                 class FullPipelineLiveCallback(tf.keras.callbacks.Callback):
-                    def __init__(self):
+                    def __init__(self, total_epochs=None):
                         super().__init__()
                         self.epoch_data = []
                         self.start_time = None
+                        self.forced_total_epochs = total_epochs
                     
                     def on_train_begin(self, logs=None):
-                        self.start_time = time.time()
+                        if self.start_time is None:
+                            self.start_time = time.time()
                     
                     def on_epoch_end(self, epoch, logs=None):
                         elapsed = time.time() - self.start_time
-                        total = self.params['epochs']
+                        total = self.forced_total_epochs if self.forced_total_epochs else self.params['epochs']
                         eta = (elapsed / (epoch+1)) * (total - epoch - 1)
                         eta_str = f"{eta/60:.1f}m" if eta > 60 else f"{eta:.0f}s"
                         loss = logs.get('loss', 0)
@@ -1150,7 +1152,7 @@ with tab_eval:
                         best_val = min(d['val_loss'] for d in self.epoch_data)
                         full_lr.caption(f"Best Val Loss: {best_val:.6f} | Elapsed: {elapsed:.0f}s")
                 
-                full_cb = FullPipelineLiveCallback()
+                full_cb = FullPipelineLiveCallback(cfg['training']['epochs'])
                 from src.trainer import train_model
                 model, history, meta = train_model(cfg, data, extra_callbacks=[full_cb])
                 st.session_state.training_history = history.history
@@ -1607,9 +1609,26 @@ with tab_train:
             
             hp['learning_rate'] = st.number_input("Learning Rate", value=hp.get('learning_rate', 0.0001),
                                                    format="%.6f", step=0.0001)
-            _bs_opts = sorted(set([16, 32, 64, 128] + [hp.get('batch_size', 32)]))
+            _bs_opts = sorted(set([16, 32, 64, 128, 256, 512] + [hp.get('batch_size', 32)]))
             hp['batch_size'] = st.selectbox("Batch Size", _bs_opts,
                                              index=_bs_opts.index(hp.get('batch_size', 32)))
+            
+            # --- NEW TACTIC 3 SCHEDULING ---
+            cfg['training']['use_batch_scheduling'] = st.checkbox(
+                "📈 Batch Size Scheduling", 
+                value=cfg['training'].get('use_batch_scheduling', False),
+                key="cb_batch_scheduling",
+                help="Taktik 3: Memulai training dengan Batch Size kecil, lalu digandakan 2x secara berkala. Membuat pencarian akurasi lebih baik di awal dan eksekusi lebih cepat di akhir."
+            )
+            if cfg['training']['use_batch_scheduling']:
+                cfg['training']['max_batch_size'] = st.selectbox(
+                    "Batas Maksimal Batch Size (Limit)", 
+                    _bs_opts,
+                    index=_bs_opts.index(cfg['training'].get('max_batch_size', 512)) if cfg['training'].get('max_batch_size', 512) in _bs_opts else len(_bs_opts)-1,
+                    key="sb_max_batch_size",
+                    help="Hentikan penggandaan batch size jika menyentuh batas ini untuk mencegah OOM error."
+                )
+
             hp['dropout'] = st.number_input("Dropout Rate", value=hp.get('dropout', 0.2), 
                                              min_value=0.0, max_value=0.9, step=0.01, format="%.2f")
             
@@ -1695,15 +1714,18 @@ with tab_train:
                 import tensorflow as tf
                 # (Reuse the Callback logic within this block or define high up)
                 class StreamlitLiveCallback(tf.keras.callbacks.Callback):
-                    def __init__(self):
+                    def __init__(self, total_epochs=None):
                         super().__init__()
                         self.epoch_data = []
                         self.start_time = None
                         self.log_lines = []
-                    def on_train_begin(self, logs=None): self.start_time = time.time()
+                        self.forced_total_epochs = total_epochs
+                    def on_train_begin(self, logs=None): 
+                        if self.start_time is None:
+                            self.start_time = time.time()
                     def on_epoch_end(self, epoch, logs=None):
                         elapsed = time.time() - self.start_time
-                        total_epochs = self.params['epochs']
+                        total_epochs = self.forced_total_epochs if self.forced_total_epochs else self.params['epochs']
                         current_lr = float(tf.keras.backend.get_value(self.model.optimizer.lr))
                         loss = logs.get('loss', 0); val_loss = logs.get('val_loss', 0)
                         progress = (epoch + 1) / total_epochs
@@ -1740,7 +1762,7 @@ with tab_train:
                 sys.stdout.flush()
 
                 tf.keras.backend.clear_session()
-                live_cb = StreamlitLiveCallback()
+                live_cb = StreamlitLiveCallback(cfg['training']['epochs'])
                 from src.trainer import train_model
                 
                 print(f"[DEBUG] Calling train_model from src.trainer...")
@@ -2283,6 +2305,22 @@ with tab_tuning:
                               
         n_trials_input = st.number_input("🎯 Jumlah Trials Optuna", min_value=1, max_value=5000, value=cfg['tuning'].get('n_trials', 50), step=10, 
                                         help="Semakin banyak trial, semakin lama diproses, tapi optuna memiliki peluang lebih besar untuk menemukan parameter konvergen terbaik.")
+        
+        # --- NEW TACTIC 1: SUBSAMPLING ---
+        cfg['tuning']['use_subsampling'] = st.checkbox(
+            "🚀 Gunakan Taktik 1: Data Subsampling", 
+            value=cfg['tuning'].get('use_subsampling', False),
+            key="cb_use_subsampling_tuning",
+            help="Taktik 1: Hanya gunakan sebagian kecil data (misal 10-20%) selama fase tuning agar proses 5-10x lebih cepat."
+        )
+        if cfg['tuning']['use_subsampling']:
+            cfg['tuning']['subsample_ratio'] = st.slider(
+                "Persentase Data untuk Tuning", 
+                min_value=0.05, max_value=0.80, 
+                value=cfg['tuning'].get('subsample_ratio', 0.20), step=0.05,
+                key="sl_subsample_ratio_tuning",
+                help="Proporsi data awal yang dipakai untuk mencari parameter terbaik."
+            )
         
         with st.expander("🛠️ Edit Search Space Hyperparameters", expanded=False):
             st.info("Atur range pencarian untuk setiap hyperparameter. Perubahan akan disimpan saat Anda menjalankan tuning.")
