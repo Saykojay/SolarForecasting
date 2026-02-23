@@ -5,11 +5,11 @@ scikit-learn
 joblib
 
 # Deep Learning
-tensorflow>=2.10
+# (TensorFlow dihapus agar tidak menimpa versi khusus GPU bawaan RunPod)
 
 # Experiment Tracking
 optuna
-optuna-integration[tfkeras]
+optuna-integration
 mlflow
 
 # TUI & Visuals
