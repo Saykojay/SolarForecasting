@@ -405,7 +405,8 @@ def build_timetracker(lookback, n_features, forecast_horizon, hp: dict):
     # Channel Independence (reshape channels into batch dimension)
     z = Permute((2, 1))(z)
     z = Reshape((n_features, lookback, 1))(z)
-    z = tf.reshape(z, [-1, lookback, 1]) 
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, lookback, 1]))(z) 
 
     # Patching
     z = PatchEmbedding(patch_len, stride, d_model)(z)
@@ -424,7 +425,8 @@ def build_timetracker(lookback, n_features, forecast_horizon, hp: dict):
     z = Dense(forecast_horizon, activation='linear')(z)
     
     # Reshape back to channels
-    z = tf.reshape(z, [-1, n_features, forecast_horizon])
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, n_features, forecast_horizon]))(z)
     z = Permute((2, 1))(z)
     
     # Denormalize
@@ -460,7 +462,8 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
     z = Permute((2, 1))(z)
     z = Reshape((n_features, lookback, 1))(z)
     # Effectively sharing weights across all channels
-    z = tf.reshape(z, [-1, lookback, 1]) 
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, lookback, 1]))(z) 
 
     # 3. Patching & Positioning
     z = PatchEmbedding(patch_len, stride, d_model)(z) # (Batch*M, NumPatches, D)
@@ -478,7 +481,8 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
     z = Dense(forecast_horizon, activation='linear')(z) # (Batch*M, Horizon)
     
     # Reshape back to channels: (Batch, M, Horizon)
-    z = tf.reshape(z, [-1, n_features, forecast_horizon])
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, n_features, forecast_horizon]))(z)
     # Permute back to time-last if needed, but RevIN expects (Batch, L, M)
     z = Permute((2, 1))(z) # (Batch, Horizon, M)
     
@@ -625,7 +629,8 @@ def build_timeperceiver(lookback, n_features, forecast_horizon, hp: dict):
     # Channel Independence
     z = Permute((2, 1))(z)
     z = Reshape((n_features, lookback, 1))(z)
-    z = tf.reshape(z, [-1, lookback, 1]) 
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, lookback, 1]))(z) 
 
     # Patching
     z = PatchEmbedding(patch_len, stride, d_model)(z)
@@ -646,7 +651,8 @@ def build_timeperceiver(lookback, n_features, forecast_horizon, hp: dict):
     )(z)
     
     # Reshape back to multivariate
-    z = tf.reshape(z, [-1, n_features, forecast_horizon])
+    from keras.layers import Lambda
+    z = Lambda(lambda x: tf.reshape(x, [-1, n_features, forecast_horizon]))(z)
     z = Permute((2, 1))(z)
     
     # Denormalize
