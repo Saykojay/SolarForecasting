@@ -1579,7 +1579,7 @@ with tab_train:
             new_arch = cfg['model']['architecture']
             
             hp['lookback'] = st.select_slider("Lookback Window (h)", 
-                                              options=[24, 48, 72, 96, 120, 144, 168, 192, 240, 336],
+                                              options=[24, 48, 72, 96, 120, 144, 168, 192, 240, 336, 504, 720],
                                               value=hp.get('lookback', 72))
             
             # Adaptive Labels for Core Structure
@@ -1885,7 +1885,7 @@ with tab_batch:
                 
                 cq1, cq2 = st.columns(2)
                 with cq1:
-                    q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168], index=2, key=f"q_lb_{q_arch_val}")
+                    q_hp['lookback'] = st.selectbox("Lookback Window (h)", [24, 48, 72, 96, 120, 144, 168, 192, 240, 336, 504, 720], index=2, key=f"q_lb_{q_arch_val}")
                     
                     _d_opts = [16, 32, 64, 128, 256, 512]
                     q_hp['d_model'] = st.selectbox(d_label, _d_opts, index=_d_opts.index(q_hp.get('d_model', 128)) if q_hp.get('d_model', 128) in _d_opts else 3, key=f"q_dm_{q_arch_val}")
