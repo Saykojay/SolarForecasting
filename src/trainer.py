@@ -365,8 +365,43 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     # Fallback: use n_heads=1 or 2 (always divides)
                     hp['n_heads'] = max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
                 logger.info(f"Auto-corrected n_heads to {hp['n_heads']} (d_model={hp['d_model']})")
+        elif arch == 'timetracker':
+            if 'patch_len' in space:
+                hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
+            else:
+                hp['patch_len'] = 16
+                
+            if 'stride' in space:
+                hp['stride'] = trial.suggest_int('stride', space['stride'][0], space['stride'][1], step=space['stride'][2])
+            else:
+                hp['stride'] = 8
+                
+            if 'n_heads' in space:
+                if isinstance(space['n_heads'], list) and len(space['n_heads']) == 2 and isinstance(space['n_heads'][0], int):
+                    hp['n_heads'] = trial.suggest_categorical('n_heads', [2**i for i in range(int(np.log2(space['n_heads'][0])), int(np.log2(space['n_heads'][1]))+1)])
+                else:
+                    hp['n_heads'] = trial.suggest_categorical('n_heads', space['n_heads'])
+            else:
+                hp['n_heads'] = 8
+
+            if 'n_shared_experts' in space:
+                hp['n_shared_experts'] = trial.suggest_int('n_shared_experts', space['n_shared_experts'][0], space['n_shared_experts'][1])
+            if 'n_private_experts' in space:
+                hp['n_private_experts'] = trial.suggest_int('n_private_experts', space['n_private_experts'][0], space['n_private_experts'][1])
+            if 'top_k' in space:
+                hp['top_k'] = trial.suggest_int('top_k', space['top_k'][0], space['top_k'][1])
+
+            # --- CONSTRAINTS ---
+            if hp['patch_len'] > hp['lookback']:
+                hp['patch_len'] = max(2, hp['lookback'] // 2)
+            if hp['stride'] > hp['patch_len']:
+                hp['stride'] = hp['patch_len']
+            if 'd_model' in hp and hp['d_model'] % hp['n_heads'] != 0:
+                valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
+                hp['n_heads'] = max(valid_heads) if valid_heads else max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
+
         else:
-            # For non-PatchTST models like GRU/LSTM, preserve specific params from cfg
+            # For non-PatchTST/TimeTracker models like GRU/LSTM/RNN, preserve specific params from cfg
             if 'use_bidirectional' in cfg['model']['hyperparameters']:
                 hp['use_bidirectional'] = cfg['model']['hyperparameters']['use_bidirectional']
             if 'use_revin' in cfg['model']['hyperparameters']:

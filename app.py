@@ -2329,7 +2329,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch == "patchtst":
+                if t_arch in ["patchtst", "timetracker"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
@@ -2363,16 +2363,33 @@ with tab_tuning:
                 l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key="l_max_new")
                 space['n_layers'] = [l_min, l_max]
                 
-                if t_arch == "patchtst":
-                    ff_vals = space.get('ff_dim', [128, 512])
-                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
-                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
-                    space['ff_dim'] = [ff_min, ff_max]
+                if t_arch in ["patchtst", "timetracker"]:
+                    if t_arch == "patchtst":
+                        ff_vals = space.get('ff_dim', [128, 512])
+                        ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
+                        ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
+                        space['ff_dim'] = [ff_min, ff_max]
                     
                     h_vals = space.get('n_heads', [4, 16])
                     h_min = st.number_input("Heads Min", 1, 32, h_vals[0], 1, key="h_min_new")
                     h_max = st.number_input("Heads Max", h_min, 64, h_vals[1], 1, key="h_max_new")
                     space['n_heads'] = [h_min, h_max]
+
+                if t_arch == "timetracker":
+                    se_vals = space.get('n_shared_experts', [1, 2])
+                    se_min = st.number_input("Shared Exp Min", 0, 8, se_vals[0], 1, key="se_min_new")
+                    se_max = st.number_input("Shared Exp Max", se_min, 8, se_vals[1], 1, key="se_max_new")
+                    space['n_shared_experts'] = [se_min, se_max]
+
+                    pe_vals = space.get('n_private_experts', [2, 8])
+                    pe_min = st.number_input("Priv Exp Min", 1, 32, pe_vals[0], 1, key="pe_min_new")
+                    pe_max = st.number_input("Priv Exp Max", pe_min, 32, pe_vals[1], 1, key="pe_max_new")
+                    space['n_private_experts'] = [pe_min, pe_max]
+
+                    tk_vals = space.get('top_k', [1, 2])
+                    tk_min = st.number_input("Top-K Min", 1, 8, tk_vals[0], 1, key="tk_min_new")
+                    tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key="tk_max_new")
+                    space['top_k'] = [tk_min, tk_max]
 
                 dr_vals = space.get('dropout', [0.05, 0.3])
                 dr_min = st.number_input("Dropout Min", 0.0, 0.5, dr_vals[0], 0.05, key="dr_min_new")

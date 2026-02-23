@@ -113,6 +113,21 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
                         "ff_dim": self.ff_dim, "dropout": self.dropout_rate})
         return config
 
+class RMSNorm(tf.keras.layers.Layer):
+    """Root Mean Square Normalization from the TimeTracker paper."""
+    def __init__(self, epsilon=1e-6, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        
+    def build(self, input_shape):
+        self.scale = self.add_weight(name='scale', shape=(input_shape[-1],), initializer='ones', trainable=True)
+        super().build(input_shape)
+        
+    def call(self, x):
+        variance = tf.reduce_mean(tf.square(x), axis=-1, keepdims=True)
+        x_norm = x * tf.math.rsqrt(variance + self.epsilon)
+        return x_norm * self.scale
+
 # ============================================================
 # TIMETRACKER CUSTOM LAYERS
 # ============================================================
@@ -152,6 +167,7 @@ class MoELayer(tf.keras.layers.Layer):
         # Router
         if n_private > 0:
             self.router = Dense(n_private, use_bias=False, name='router')
+            self.b = self.add_weight(name='router_bias', shape=(n_private,), initializer='zeros', trainable=False)
 
     def call(self, x, training=False):
         # x shape: (Batch, SeqLen, D)
@@ -167,11 +183,24 @@ class MoELayer(tf.keras.layers.Layer):
             # Routing logits: (Batch, SeqLen, n_private)
             router_logits = self.router(x)
             
-            # Select Top-K experts
-            routing_weights = tf.nn.softmax(router_logits, axis=-1)
+            # Auxiliary-loss-free Load Balance (TimeTracker Paper)
+            routing_weights = tf.nn.softmax(router_logits + self.b, axis=-1)
             top_k_weights, top_k_indices = tf.math.top_k(routing_weights, k=self.top_k)
+            
             # Normalize top-k weights so they sum to 1
             top_k_weights = top_k_weights / tf.reduce_sum(top_k_weights, axis=-1, keepdims=True)
+            
+            # Bias update logic during training
+            if training:
+                batch_size = tf.shape(x)[0]
+                seq_len = tf.shape(x)[1]
+                flat_indices = tf.reshape(top_k_indices, [-1])
+                # Count usage of each expert
+                c = tf.math.bincount(flat_indices, minlength=self.n_private, maxlength=self.n_private, dtype=tf.float32)
+                c_mean = tf.reduce_mean(c)
+                e = c_mean - c
+                u = 0.001 # learning rate for bias update
+                self.b.assign_add(u * tf.sign(e))
             
             # This is a simplified dense execution for TF graph compatibility:
             # Evaluate all experts (ok for small n_private like 4) and multiply by mask
@@ -219,19 +248,20 @@ class TimeTrackerBlock(tf.keras.layers.Layer):
         
         self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)
         self.dropout1 = Dropout(dropout)
-        self.bn1 = BatchNormalization()
+        self.norm1 = RMSNorm()
         
         self.moe = MoELayer(d_model, ff_dim, n_shared, n_private, top_k, dropout)
-        self.bn2 = BatchNormalization()
+        self.norm2 = RMSNorm()
 
     def call(self, x, training=False):
-        # Attention
-        x_norm = self.bn1(x, training=training)
-        attn_out = self.mha(x_norm, x_norm)
+        # Causal Attention with RMSNorm
+        x_norm = self.norm1(x, training=training)
+        # Use simple causal mask for decoder-only style TimeTracker
+        attn_out = self.mha(x_norm, x_norm, use_causal_mask=True)
         x = x + self.dropout1(attn_out, training=training)
         
-        # MoE FFN
-        x_norm = self.bn2(x, training=training)
+        # MoE FFN with RMSNorm
+        x_norm = self.norm2(x, training=training)
         moe_out = self.moe(x_norm, training=training)
         return x + moe_out
 
@@ -420,7 +450,7 @@ def build_timetracker(lookback, n_features, forecast_horizon, hp: dict):
             dropout=dropout, name=f'tt_block_{i}'
         )(z)
 
-    # Forecasting Head
+    # Independent Head (Predicting each channel's horizon independently)
     z = Flatten()(z)
     z = Dense(forecast_horizon, activation='linear')(z)
     
@@ -432,7 +462,7 @@ def build_timetracker(lookback, n_features, forecast_horizon, hp: dict):
     # Denormalize
     z = revin_layer(z, mode='denorm')
     
-    # Output dense for multi-to-one
+    # Final learned projection across all features (Simplified Spatial-Temporal fusion)
     z_final = Flatten()(z)
     outputs = Dense(forecast_horizon, activation='linear', name='output_layer')(z_final)
 
