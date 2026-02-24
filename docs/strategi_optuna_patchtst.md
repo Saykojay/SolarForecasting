@@ -2,7 +2,7 @@
 
 PatchTST adalah salah satu model berbasis Transformer paling canggih saat ini untuk Time Series (*Channel Independent Patch Time Series Transformer*). Tidak seperti GRU yang memproses data langkah demi langkah, PatchTST memotong data *lookback* menjadi "patch" (potongan kecil) dan memprosesnya secara paralel. Oleh karena itu, *search space* untuk model ini membutuhkan konfigurasi yang sangat spesifik dan sinkron matematis (misalnya ukuran *patch* harus selaras dengan *stride* dan *lookback*).
 
-Berdasarkan arsitektur *Hugging Face* (`patchtst_hf`) dan *best practice* eksekusi 100 trials menggunakan **TPE (Tree-structured Parzen Estimator)**, berikut adalah rancangan ruang pencariannya.
+Berdasarkan implementasi arsitektur **TensorFlow/Keras** khusus (`patchtst`) dan *best practice* eksekusi 100 trials menggunakan **TPE (Tree-structured Parzen Estimator)**, berikut adalah rancangan ruang pencariannya.
 
 ---
 
