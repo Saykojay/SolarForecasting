@@ -44,7 +44,7 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
             'learning_rate': [0.0001, 0.005],
             'batch_size': [32, 32], # Statis seperti anjuran
             'lookback': [24, 168, 24],
-            'use_bidirectional': [True, False]
+            'use_bidirectional': [True] # <-- Fixed to True only
         }
     elif arch_name in ['patchtst', 'patchtst_hf', 'autoformer_hf']:
         cfg['tuning']['search_space'] = {
