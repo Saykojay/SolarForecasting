@@ -38,13 +38,13 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
     # 3. Define Architecture-Specific Search Spaces
     if arch_name in ['gru', 'lstm', 'rnn']:
         cfg['tuning']['search_space'] = {
-            'd_model': [64, 128, 256],         # MUST match existing DB distribution (Categorical [64,128,256])
-            'n_layers': [1, 3],                # Int [1, 3]
-            'dropout': [0.1, 0.3],             # Float [0.1, 0.3] -- match DB
-            'learning_rate': [0.0005, 0.005],  # Float log [0.0005, 0.005] -- match DB
-            'batch_size': [32, 32],            # Categorical [32] -- statis
-            'lookback': [24, 120, 24],         # Int step=24 [24, 120] -- match DB
-            'use_bidirectional': [True]        # Categorical [True] -- match DB
+            'd_model': [32, 64, 128],          # Dikecilkan agar pas di VRAM RTX 3050 Ti (4GB)
+            'n_layers': [1, 2],                # Maksimal 2 layer untuk mempercepat komputasi sekuensial
+            'dropout': [0.1, 0.4],             # Float dropout
+            'learning_rate': [5e-4, 5e-3],     # Standar optimasi RNN (jangan terlalu kecil)
+            'batch_size': [64, 128],           # Naikkan dari 32 ke 64/128 agar pipeline GPU penuh, tapi tidak OOM
+            'lookback': [24, 96, 24],          # Maksimal 96 jam (4 Hari) mencegah Vanishing Gradient
+            'use_bidirectional': [True, False] # Izinkan False: Mode searah 2x lebih cepat
         }
     elif arch_name in ['patchtst', 'patchtst_hf']:
         cfg['tuning']['search_space'] = {

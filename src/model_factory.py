@@ -685,7 +685,8 @@ def build_gru(lookback, n_features, forecast_horizon, hp: dict):
         
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
-        layer = GRULayer(d_model, return_sequences=return_seq, dropout=dropout)
+        # HAPUS parameter dropout di sini agar cuDNN NVIDIA aktif (kecepatan naik 5x - 10x)
+        layer = GRULayer(d_model, return_sequences=return_seq)
         x = Bidirectional(layer)(x) if use_bi else layer(x)
 
     x = Dense(128, activation='relu')(x)
@@ -721,7 +722,8 @@ def build_lstm(lookback, n_features, forecast_horizon, hp: dict):
         
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
-        layer = LSTMLayer(d_model, return_sequences=return_seq, dropout=dropout)
+        # HAPUS parameter dropout di sini agar cuDNN NVIDIA aktif (kecepatan naik 5x - 10x)
+        layer = LSTMLayer(d_model, return_sequences=return_seq)
         x = Bidirectional(layer)(x) if use_bi else layer(x)
 
     x = Dense(128, activation='relu')(x)
@@ -757,7 +759,8 @@ def build_rnn(lookback, n_features, forecast_horizon, hp: dict):
         
     for i in range(n_layers):
         return_seq = (i < n_layers - 1)
-        layer = RNNLayer(d_model, return_sequences=return_seq, dropout=dropout)
+        # HAPUS parameter dropout di sini agar cuDNN NVIDIA aktif (kecepatan naik 5x - 10x)
+        layer = RNNLayer(d_model, return_sequences=return_seq)
         x = Bidirectional(layer)(x) if use_bi else layer(x)
 
     x = Dense(128, activation='relu')(x)
