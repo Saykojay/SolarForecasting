@@ -2404,7 +2404,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "autoformer"]:
+                if t_arch in ["patchtst", "patchtst_hf", "causal_transformer_hf", "timetracker"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key=f"p_min_{t_arch}")
@@ -2417,6 +2417,15 @@ with tab_tuning:
                     s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key=f"s_max_{t_arch}")
                     s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key=f"s_step_{t_arch}")
                     space['stride'] = [s_min, s_max, s_step]
+                elif t_arch in ["autoformer", "autoformer_hf"]:
+                    st.markdown("**1. Moving Avg (Decomposition)**")
+                    st.info("Parameter wajib bernilai ganjil.")
+                    m_vals = space.get('moving_avg', [25, 49])
+                    m_min_val = m_vals[0] if len(m_vals) > 0 else 25
+                    m_max_val = m_vals[1] if len(m_vals) > 1 else 49
+                    m_min = st.number_input("Moving Avg Min (Odd)", 3, 99, m_min_val, 2, key=f"m_min_{t_arch}")
+                    m_max = st.number_input("Moving Avg Max (Odd)", m_min, 99, m_max_val, 2, key=f"m_max_{t_arch}")
+                    space['moving_avg'] = [m_min, m_max]
                 else:
                     st.markdown(f"**1. {t_arch.upper()} Configuration**")
                     st.info("Parameter patching tidak tersedia untuk arsitektur ini.")
