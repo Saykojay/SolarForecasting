@@ -38,13 +38,13 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
     # 3. Define Architecture-Specific Search Spaces
     if arch_name in ['gru', 'lstm', 'rnn']:
         cfg['tuning']['search_space'] = {
-            'd_model': [32, 64, 128],          # Dikecilkan agar pas di VRAM RTX 3050 Ti (4GB)
-            'n_layers': [1, 2],                # Maksimal 2 layer untuk mempercepat komputasi sekuensial
+            'd_model': [64, 128, 256],         # A4500 20GB bisa tampung lebih besar
+            'n_layers': [1, 3],                # Eksplorasi sampai 3 layer
             'dropout': [0.1, 0.4],             # Float dropout
-            'learning_rate': [5e-4, 5e-3],     # Standar optimasi RNN (jangan terlalu kecil)
-            'batch_size': [32, 32],            # Dikunci di 32 sesuai permintaan
-            'lookback': [24, 96, 24],          # Maksimal 96 jam (4 Hari) mencegah Vanishing Gradient
-            'use_bidirectional': [False]       # Dimatikan mutlak untuk memangkas waktu komputasi 50%
+            'learning_rate': [1e-4, 5e-3],     # Sedikit lebih lebar untuk eksplorasi
+            'batch_size': [32, 32],            # Dikunci di 32 (aman paralel dengan Autoformer)
+            'lookback': [24, 168, 24],         # Sampai 7 hari (168 jam)
+            'use_bidirectional': [True]        # BiLSTM: Bidirectional ON
         }
     elif arch_name in ['patchtst', 'patchtst_hf']:
         cfg['tuning']['search_space'] = {
