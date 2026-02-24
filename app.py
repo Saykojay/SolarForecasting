@@ -1041,21 +1041,31 @@ with tab_eval:
                     model_root = model_dir # default parent
                     
                     # Handle bundled folder
-                    if os.path.isdir(model_path):
+                    if os.path.exists(model_path) and os.path.isdir(model_path):
                         model_root = model_path
-                        # Try model.keras then model.h5
-                        possible_files = [os.path.join(model_path, 'model_hf'),
-                                  os.path.join(model_path, 'model.keras'), 
-                                  os.path.join(model_path, 'model.h5')]
-                        found = False
-                        for pf in possible_files:
-                            if os.path.exists(pf):
-                                model_path = pf
-                                found = True
-                                break
-                        if not found:
-                            st.error(f"Bundle model tidak valid (model.keras/h5/model_hf tidak ditemukan): {model_id}")
-                            st.stop()
+                        # Priority check for HF/PyTorch
+                        if os.path.exists(os.path.join(model_path, 'pytorch_model.bin')) or \
+                           os.path.exists(os.path.join(model_path, 'config.json')) or \
+                           os.path.exists(os.path.join(model_path, 'model_hf')):
+                            is_hf = True
+                            if os.path.exists(os.path.join(model_path, 'model_hf')):
+                                model_path = os.path.join(model_path, 'model_hf')
+                        else:
+                            is_hf = False
+                            # Try model.keras then model.h5
+                            possible_files = [os.path.join(model_path, 'model.keras'), 
+                                              os.path.join(model_path, 'model.h5')]
+                            found = False
+                            for pf in possible_files:
+                                if os.path.exists(pf):
+                                    model_path = pf
+                                    found = True
+                                    break
+                            if not found:
+                                st.error(f"Bundle model tidak valid (model.keras/h5/pytorch_model.bin tidak ditemukan): {model_id}")
+                                st.stop()
+                    else:
+                        is_hf = False
                     
                     if not os.path.exists(model_path):
                         st.error(f"File model tidak ditemukan: {model_path}")
@@ -1065,7 +1075,7 @@ with tab_eval:
                     custom_objs = get_custom_objects()
                     with tf.keras.utils.custom_object_scope(custom_objs):
                         # Use compile=False to avoid HDF5 object not found errors related to optimizer state
-                        if model_path.endswith('model_hf'):
+                        if is_hf:
                             from src.model_hf import load_hf_wrapper
                             model = load_hf_wrapper(model_path)
                         else:
@@ -2765,19 +2775,21 @@ with tab_eval:
                             model_path = os.path.join(model_dir, model_to_eval)
                             model_root = model_dir
                             
-                            if os.path.isdir(model_path):
-                                model_root = model_path
-                                if os.path.exists(os.path.join(model_path, 'model_hf')):
-                                    model_path = os.path.join(model_path, 'model_hf')
+                            if os.path.exists(model_path) and os.path.isdir(model_path):
+                                if os.path.exists(os.path.join(model_path, 'pytorch_model.bin')) or \
+                                   os.path.exists(os.path.join(model_path, 'config.json')) or \
+                                   os.path.exists(os.path.join(model_path, 'model_hf')):
+                                    is_hf = True
+                                    if os.path.exists(os.path.join(model_path, 'model_hf')):
+                                        model_path = os.path.join(model_path, 'model_hf')
                                 else:
-                                    for ext in ['model.keras', 'model.h5']:
-                                        if os.path.exists(os.path.join(model_path, ext)):
-                                            model_path = os.path.join(model_path, ext)
-                                            break
-                                        
+                                    is_hf = False
+                            else:
+                                is_hf = False
+
                             custom_objs = get_custom_objects()
                             with tf.keras.utils.custom_object_scope(custom_objs):
-                                if model_path.endswith('model_hf'):
+                                if is_hf:
                                     from src.model_hf import load_hf_wrapper
                                     model = load_hf_wrapper(model_path)
                                 else:
@@ -3301,19 +3313,23 @@ with tab_compare:
                     
                     # LOG START TO CMD
                     print("\n" + "="*60)
-                    print(f"📊 COMPARISON START: {datetime.now().strftime('%H:%M:%S')}")
+                    print(f"COMPARISON START: {datetime.now().strftime('%H:%M:%S')}")
                     print(f"   Models to evaluate: {len(selected_models)}")
                     print("="*60)
                     sys.stdout.flush()
 
                     with st.spinner("🚀 Sedang menjalankan evaluasi mendalam..."):
                         for i, model_id in enumerate(selected_models):
-                            msg = f"⏳ [{i+1}/{len(selected_models)}] Mengevaluasi: {model_id}"
-                            status_text.text(msg)
+                            msg = f"[{i+1}/{len(selected_models)}] Mengevaluasi: {model_id}"
+                            status_text.text("⏳ " + msg)
                             print(f"   {msg}...")
                             sys.stdout.flush()
                             
                             try:
+                                import io, contextlib
+                                # Mute stdout here to avoid UnicodeEncodeErrors in Windows consoles caused by emojis inside evaluate_model
+                                dummy_out = io.StringIO()
+                                
                                 # 1. Clean session
                                 tf.keras.backend.clear_session()
                                 gc.collect()
@@ -3321,29 +3337,38 @@ with tab_compare:
                                 # 2. Get Model Path
                                 model_path = os.path.join(model_dir, model_id)
                                 model_root = model_dir
-                                if os.path.isdir(model_path):
+                                if os.path.exists(model_path) and os.path.isdir(model_path):
                                     model_root = model_path
-                                    if os.path.exists(os.path.join(model_path, 'model_hf')):
-                                        model_path = os.path.join(model_path, 'model_hf')
+                                    if os.path.exists(os.path.join(model_path, 'pytorch_model.bin')) or \
+                                       os.path.exists(os.path.join(model_path, 'config.json')) or \
+                                       os.path.exists(os.path.join(model_path, 'model_hf')):
+                                        is_hf = True
+                                        if os.path.exists(os.path.join(model_path, 'model_hf')):
+                                            model_path = os.path.join(model_path, 'model_hf')
                                     else:
+                                        is_hf = False
                                         for ext in ['model.keras', 'model.h5']:
                                             if os.path.exists(os.path.join(model_path, ext)):
                                                 model_path = os.path.join(model_path, ext)
                                                 break
+                                else:
+                                    is_hf = False
                                 
                                 # 3. Load Model
                                 custom_objs = get_custom_objects()
                                 with tf.keras.utils.custom_object_scope(custom_objs):
-                                    if model_path.endswith('model_hf'):
-                                        from src.model_hf import load_hf_wrapper
-                                        model = load_hf_wrapper(model_path)
-                                    else:
-                                        model = tf.keras.models.load_model(model_path, compile=False)
-                                        compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
-                                
+                                    with contextlib.redirect_stdout(dummy_out):
+                                        if is_hf:
+                                            from src.model_hf import load_hf_wrapper
+                                            model = load_hf_wrapper(model_path)
+                                        else:
+                                            model = tf.keras.models.load_model(model_path, compile=False)
+                                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                                    
                                 # 4. Run Evaluation
                                 res = None
                                 eval_source = "Unknown"
+                                m_meta = {}
                                 
                                 # Strategy 1: Load data from model's own data_source in meta.json
                                 meta_path = os.path.join(model_root, "meta.json")
@@ -3356,7 +3381,8 @@ with tab_compare:
                                         if orig_ds and os.path.exists(orig_ds):
                                             temp_cfg = copy.deepcopy(cfg)
                                             temp_cfg['paths']['processed_dir'] = orig_ds
-                                            res = evaluate_model(model, temp_cfg, data=None, scaler_dir=model_root)
+                                            with contextlib.redirect_stdout(dummy_out):
+                                                res = evaluate_model(model, temp_cfg, data=None, scaler_dir=model_root)
                                             eval_source = "Bundled Data"
                                     except Exception as e_meta:
                                         print(f"      (!) Meta failed: {e_meta}")
@@ -3365,10 +3391,11 @@ with tab_compare:
                                 if res is None:
                                     active_prep = st.session_state.get('prep_metadata', None)
                                     if active_prep is not None and active_prep.get('X_train') is not None:
-                                        expected_n = model.input_shape[2]
+                                        expected_n = model.input_shape[2] if hasattr(model, 'input_shape') else active_prep['X_train'].shape[2]
                                         if active_prep['X_train'].shape[2] == expected_n:
                                             scaler_dir = model_root if os.path.isdir(model_root) else None
-                                            res = evaluate_model(model, cfg, data=active_prep, scaler_dir=scaler_dir)
+                                            with contextlib.redirect_stdout(dummy_out):
+                                                res = evaluate_model(model, cfg, data=active_prep, scaler_dir=scaler_dir)
                                             eval_source = "Active Data"
                                         else:
                                             raise ValueError(f"Dim mismatch: Model={expected_n}, Prep={active_prep['X_train'].shape[2]}")
@@ -3379,7 +3406,8 @@ with tab_compare:
                                 m_test = res['metrics_test']
                                 m_train = res['metrics_train']
                                 
-                                train_time = m_meta.get('training_time_seconds', 0) if m_meta else 0
+                                train_time = m_meta.get('training_time_seconds', 0)
+                                if train_time is None: train_time = 0
                                 
                                 feat_text = "N/A"
                                 ds_path = m_meta.get('data_source', '').replace('\\', '/') if m_meta else ''
@@ -3421,12 +3449,12 @@ with tab_compare:
                                     'Lookback': getattr(model, 'input_shape', [0,0,0])[1] if hasattr(model, 'input_shape') else '?',
                                     'Verified On': eval_source
                                 })
-                                print(f"      ✅ Done (R²: {m_test['r2']:.4f})")
+                                print(f"      OK (R2: {m_test['r2']:.4f})")
                                 
                             except Exception as e:
                                 err_info = str(e)
                                 st.error(f"Error pada {model_id}: {err_info}")
-                                print(f"      ❌ ERROR: {err_info}")
+                                print(f"      ERROR: {err_info}")
                                 comparison_results.append({
                                     'Model ID': model_id,
                                     'R²': 0, 'MAE': 999, 'nMAE (%)': 999, 
@@ -3440,7 +3468,7 @@ with tab_compare:
                         
                         status_text.empty()
                         st.session_state.comparison_df = pd.DataFrame(comparison_results)
-                        print(f"\n✅ COMPARISON FINISHED: {len(comparison_results)} models analyzed.")
+                        print(f"\nCOMPARISON FINISHED: {len(comparison_results)} models analyzed.")
                         print("="*60 + "\n")
                         sys.stdout.flush()
                         st.success("Analisis perbandingan selesai! Hasil tampil di bawah.")

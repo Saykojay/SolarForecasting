@@ -346,9 +346,14 @@ class HFModelWrapper:
     def __init__(self, model):
         self.model = model
         # Expose properties to mock Keras model
-        self.output_shape = (None, model.config.prediction_length)
-        self.input_shape = (None, model.config.context_length, model.config.num_input_channels)
-        self.name = "patchtst_hf"
+        if hasattr(model, 'config'):
+            self.output_shape = (None, model.config.prediction_length)
+            self.input_shape = (None, model.config.context_length, getattr(model.config, 'num_input_channels', getattr(model.config, 'input_size', 1)))
+        else:
+            # For custom models like CausalTransformer
+            self.output_shape = (None, model.forecast_horizon)
+            self.input_shape = (None, model.lookback, model.n_features)
+        self.name = "hf_model_wrapper"
 
     def predict(self, dataset_or_array, verbose=0):
         import torch
@@ -370,14 +375,138 @@ class HFModelWrapper:
                 preds.append(out.cpu().numpy())
             return np.vstack(preds)
         else:
-            xb = torch.tensor(dataset_or_array, dtype=torch.float32).to(device)
-            with torch.no_grad():
-                out = self.model(past_values=xb).prediction_outputs
-                if out.shape[-1] > 1:
-                    out = out[:,:,0:1]
-            return out.cpu().numpy()
+            # Process numpy array in batches to prevent Memory OOM and CUBLAS execution errors
+            batch_size = 32
+            out_list = []
+            for i in range(0, len(dataset_or_array), batch_size):
+                xb = torch.tensor(dataset_or_array[i:i+batch_size], dtype=torch.float32).to(device)
+                with torch.no_grad():
+                    out = self.model(past_values=xb).prediction_outputs
+                    if hasattr(out, 'prediction_outputs'):
+                         out = out.prediction_outputs
+                    if out.shape[-1] > 1:
+                        out = out[:,:,0:1]
+                out_list.append(out.cpu().numpy())
+                
+                del xb, out
+            
+            return np.vstack(out_list) if out_list else np.array([])
 
 def load_hf_wrapper(model_path):
-    from transformers import PatchTSTForPrediction
-    model = PatchTSTForPrediction.from_pretrained(model_path)
+    """
+    Robust loader for PyTorch-based models (PatchTST, Autoformer, CausalTransformer).
+    """
+    import os
+    import json
+    import torch
+    
+    # meta.json is usually inside the bundle folder or the parent of model_hf
+    arch = "unknown"
+    meta_candidates = [
+        os.path.join(model_path, "meta.json"),
+        os.path.join(os.path.dirname(model_path), "meta.json")
+    ]
+    meta_content = {}
+    for mc in meta_candidates:
+        if os.path.exists(mc):
+            try:
+                with open(mc, 'r') as f:
+                    meta_content = json.load(f)
+                    arch = meta_content.get('architecture', 'unknown').lower()
+                    break
+            except Exception: pass
+    
+    # 1. HF Native models (PatchTST)
+    if arch == 'patchtst_hf' or (arch == 'unknown' and os.path.exists(os.path.join(model_path, "config.json"))):
+        try:
+            from transformers import PatchTSTForPrediction
+            model = PatchTSTForPrediction.from_pretrained(model_path)
+        except Exception as e:
+            # If standard from_pretrained fails (e.g. torch vulnerability check), try manual reconstruction if we have meta
+            if arch == 'patchtst_hf' and meta_content:
+                from transformers import PatchTSTConfig
+                hp = meta_content.get('hyperparameters', {})
+                config = PatchTSTConfig(
+                    context_length=meta_content.get('lookback', hp.get('lookback', 72)),
+                    prediction_length=meta_content.get('forecast_horizon', 24),
+                    num_input_channels=meta_content.get('n_features', 1),
+                    patch_length=hp.get('patch_len', 16),
+                    patch_stride=hp.get('stride', 8),
+                    d_model=hp.get('d_model', 64),
+                    num_hidden_layers=hp.get('n_layers', 2),
+                    num_attention_heads=hp.get('n_heads', 4),
+                    ffn_dim=hp.get('ff_dim', 128),
+                    use_cache=False
+                )
+                model = PatchTSTForPrediction(config)
+                bin_path = os.path.join(model_path, "pytorch_model.bin")
+                if not os.path.exists(bin_path):
+                    bin_path = os.path.join(os.path.dirname(model_path), "pytorch_model.bin")
+                state_dict = torch.load(bin_path, map_location='cpu')
+                model.load_state_dict(state_dict)
+            else:
+                raise e
+    
+    # 2. Custom HF Wrappers (Autoformer)
+    elif arch == 'autoformer_hf':
+        from transformers import AutoformerConfig
+        hp = meta_content.get('hyperparameters', {})
+        lookback = meta_content.get('lookback', hp.get('lookback', 72))
+        horizon = meta_content.get('forecast_horizon', 24)
+        n_features = meta_content.get('n_features', 1)
+        
+        # MUST match the build_autoformer_hf exactly
+        config = AutoformerConfig(
+            context_length=lookback,
+            prediction_length=horizon,
+            input_size=n_features,
+            num_time_features=0,
+            d_model=hp.get('d_model', 128),
+            encoder_layers=hp.get('n_layers', 3),
+            decoder_layers=hp.get('n_layers', 3),
+            encoder_attention_heads=hp.get('n_heads', 16),
+            decoder_attention_heads=hp.get('n_heads', 16),
+            encoder_ffn_dim=hp.get('ff_dim', 256),
+            decoder_ffn_dim=hp.get('ff_dim', 256),
+            dropout=hp.get('dropout', 0.2),
+            moving_avg=hp.get('moving_avg', 25),
+            lags_sequence=[0], # CRITICAL to match dimension 3*input_size
+            label_length=0,
+            scaling=False,
+        )
+        
+        model = CustomAutoformerForPrediction(config)
+        bin_path = os.path.join(model_path, "pytorch_model.bin")
+        if not os.path.exists(bin_path):
+            bin_path = os.path.join(os.path.dirname(model_path), "pytorch_model.bin")
+        
+        state_dict = torch.load(bin_path, map_location='cpu')
+        model.load_state_dict(state_dict)
+    
+    # 2. Custom PyTorch models (CausalTransformer)
+    elif arch == 'causal_transformer_hf' or 'causal' in arch:
+        checkpoint_candidates = [
+            os.path.join(model_path, "pytorch_model.bin"),
+            os.path.join(os.path.dirname(model_path), "pytorch_model.bin"),
+            os.path.join(model_path, "model.pt")
+        ]
+        checkpoint_path = None
+        for cc in checkpoint_candidates:
+            if os.path.exists(cc):
+                checkpoint_path = cc
+                break
+                
+        if checkpoint_path and meta_content:
+            hp = meta_content.get('hyperparameters', {})
+            lookback = meta_content.get('lookback', hp.get('lookback', 336))
+            n_features = meta_content.get('n_features', 1)
+            horizon = meta_content.get('forecast_horizon', 24)
+            
+            model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+        else:
+            raise ValueError(f"Missing checkpoint or metadata for CausalTransformer at {model_path}")
+    else:
+        raise ValueError(f"Cannot determine how to load HF model at {model_path} (Arch: {arch})")
+            
     return HFModelWrapper(model)
