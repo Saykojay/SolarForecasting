@@ -484,7 +484,8 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             else:
                 model = build_causal_transformer_hf(hp['lookback'], n_features, horizon, hp)
             # Make sure we pass batch_size, epochs etc. to PyTorch trainer
-            hp['batch_size'] = trial.suggest_categorical('batch_size', space.get('batch_size', [16, 32, 64, 128])) if 'batch_size' in space else cfg['training'].get('batch_size', 32)
+            if 'batch_size' not in hp:
+                hp['batch_size'] = cfg['training'].get('batch_size', 32)
             hp['epochs'] = 100 # Standard tuning limit
             hp['loss'] = loss_fn
             
