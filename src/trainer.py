@@ -506,7 +506,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             history = model.fit(
                 X_tr, y_tr, validation_data=(X_va, y_va),
                 epochs=100, batch_size=hp['batch_size'],
-                callbacks=[early_stop, pruning_cb], verbose=0
+                callbacks=[early_stop, pruning_cb], verbose=1
             )
             val_loss = min(history.history['val_loss'])
 
