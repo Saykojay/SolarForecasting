@@ -62,7 +62,7 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
     elif arch_name in ['autoformer_hf', 'autoformer']:
         cfg['tuning']['search_space'] = {
             'moving_avg': [25, 49], # Window trend dekonsruksi (harus ganjil/odd array)
-            'd_model': [64, 128],
+            'd_model': [64, 128, 256],  # Harus match distribusi 23 trial lama (agar bisa resume)
             'n_layers': [2, 4],
             'n_heads': [8, 16],
             'ff_dim': [256, 512],
