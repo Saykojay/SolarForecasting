@@ -42,9 +42,9 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
             'n_layers': [1, 2],                # Maksimal 2 layer untuk mempercepat komputasi sekuensial
             'dropout': [0.1, 0.4],             # Float dropout
             'learning_rate': [5e-4, 5e-3],     # Standar optimasi RNN (jangan terlalu kecil)
-            'batch_size': [64, 128],           # Naikkan dari 32 ke 64/128 agar pipeline GPU penuh, tapi tidak OOM
+            'batch_size': [32, 32],            # Dikunci di 32 sesuai permintaan
             'lookback': [24, 96, 24],          # Maksimal 96 jam (4 Hari) mencegah Vanishing Gradient
-            'use_bidirectional': [True, False] # Izinkan False: Mode searah 2x lebih cepat
+            'use_bidirectional': [False]       # Dimatikan mutlak untuk memangkas waktu komputasi 50%
         }
     elif arch_name in ['patchtst', 'patchtst_hf']:
         cfg['tuning']['search_space'] = {
