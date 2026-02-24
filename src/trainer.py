@@ -13,8 +13,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime
 import logging
 import joblib
-from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
-
 logger = logging.getLogger(__name__)
 # Ensure basic logging is configured if not already
 if not logger.handlers:
@@ -84,12 +82,14 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     n_features = data.get('n_features') or data['X_train'].shape[2]
     
-    if arch == 'patchtst_hf':
-        model = build_patchtst_hf(lookback, n_features, horizon, hp)
-    elif arch == 'autoformer_hf':
-        model = build_autoformer_hf(lookback, n_features, horizon, hp)
-    elif arch == 'causal_transformer_hf':
-        model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
+    if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+        from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf
+        if arch == 'patchtst_hf':
+            model = build_patchtst_hf(lookback, n_features, horizon, hp)
+        elif arch == 'autoformer_hf':
+            model = build_autoformer_hf(lookback, n_features, horizon, hp)
+        elif arch == 'causal_transformer_hf':
+            model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
     else:
         model = build_model(arch, lookback, n_features, horizon, hp)
         compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
@@ -128,6 +128,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
         cbs.extend(extra_callbacks)
 
     if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+        from src.model_hf import train_eval_pytorch_model
         # Use simple epochs since Custom PyTorch loop handles patience
         hp['epochs'] = total_epochs
         hp['batch_size'] = init_batch_size
@@ -271,7 +272,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 # ============================================================
 # OPTUNA HYPERPARAMETER TUNING
 # ============================================================
-def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
+def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse', verbose: bool = True):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
     try:
@@ -356,17 +357,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
 
         # Architecture-Specific Hyperparameters
-        if arch in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'autoformer']:
-            if 'patch_len' in space:
-                hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
-            else:
-                hp['patch_len'] = 16
-                
-            if 'stride' in space:
-                hp['stride'] = trial.suggest_int('stride', space['stride'][0], space['stride'][1], step=space['stride'][2])
-            else:
-                hp['stride'] = 8
-                
+        if arch in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'autoformer', 'causal_transformer_hf', 'timetracker']:
             if 'n_heads' in space:
                 if isinstance(space['n_heads'], list) and len(space['n_heads']) == 2 and isinstance(space['n_heads'][0], int):
                     hp['n_heads'] = trial.suggest_categorical('n_heads', [2**i for i in range(int(np.log2(space['n_heads'][0])), int(np.log2(space['n_heads'][1]))+1)])
@@ -380,26 +371,16 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     hp['ff_dim'] = trial.suggest_categorical('ff_dim', [2**i for i in range(int(np.log2(space['ff_dim'][0])), int(np.log2(space['ff_dim'][1]))+1)])
                 else:
                     hp['ff_dim'] = trial.suggest_categorical('ff_dim', space['ff_dim'])
-
-            # --- CONSTRAINT 1: patch_len must fit within lookback ---
-            if hp['patch_len'] > hp['lookback']:
-                hp['patch_len'] = max(2, hp['lookback'] // 2)
-
-            # --- CONSTRAINT 2: stride must be <= patch_len ---
-            if hp['stride'] > hp['patch_len']:
-                hp['stride'] = hp['patch_len']
-
-            # --- CONSTRAINT 3: d_model must be divisible by n_heads ---
+                    
             if 'd_model' in hp and hp['d_model'] % hp['n_heads'] != 0:
-                # Find the nearest valid n_heads (largest divisor <= current n_heads)
                 valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
                 if valid_heads:
                     hp['n_heads'] = max(valid_heads)
                 else:
-                    # Fallback: use n_heads=1 or 2 (always divides)
                     hp['n_heads'] = max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
                 logger.info(f"Auto-corrected n_heads to {hp['n_heads']} (d_model={hp['d_model']})")
-        elif arch == 'timetracker':
+
+        if arch in ['patchtst', 'patchtst_hf', 'timetracker']:
             if 'patch_len' in space:
                 hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
             else:
@@ -410,14 +391,22 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             else:
                 hp['stride'] = 8
                 
-            if 'n_heads' in space:
-                if isinstance(space['n_heads'], list) and len(space['n_heads']) == 2 and isinstance(space['n_heads'][0], int):
-                    hp['n_heads'] = trial.suggest_categorical('n_heads', [2**i for i in range(int(np.log2(space['n_heads'][0])), int(np.log2(space['n_heads'][1]))+1)])
-                else:
-                    hp['n_heads'] = trial.suggest_categorical('n_heads', space['n_heads'])
-            else:
-                hp['n_heads'] = 8
+            if hp['patch_len'] > hp['lookback']:
+                hp['patch_len'] = max(2, hp['lookback'] // 2)
+            if hp['stride'] > hp['patch_len']:
+                hp['stride'] = hp['patch_len']
 
+        if arch in ['autoformer_hf', 'autoformer']:
+            if 'moving_avg' in space:
+                ma_min, ma_max = space['moving_avg'][0], space['moving_avg'][1]
+                if ma_min % 2 == 0: ma_min += 1
+                if ma_max % 2 == 0: ma_max -= 1
+                if ma_min <= ma_max:
+                    hp['moving_avg'] = trial.suggest_int('moving_avg', ma_min, ma_max, step=2)
+                else:
+                    hp['moving_avg'] = 25
+
+        if arch == 'timetracker':
             if 'n_shared_experts' in space:
                 hp['n_shared_experts'] = trial.suggest_int('n_shared_experts', space['n_shared_experts'][0], space['n_shared_experts'][1])
             if 'n_private_experts' in space:
@@ -425,17 +414,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             if 'top_k' in space:
                 hp['top_k'] = trial.suggest_int('top_k', space['top_k'][0], space['top_k'][1])
 
-            # --- CONSTRAINTS ---
-            if hp['patch_len'] > hp['lookback']:
-                hp['patch_len'] = max(2, hp['lookback'] // 2)
-            if hp['stride'] > hp['patch_len']:
-                hp['stride'] = hp['patch_len']
-            if 'd_model' in hp and hp['d_model'] % hp['n_heads'] != 0:
-                valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
-                hp['n_heads'] = max(valid_heads) if valid_heads else max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
-
-        else:
-            # For non-PatchTST/TimeTracker/Autoformer models like GRU/LSTM/RNN, allow tuning bidirectional feature
+        if arch in ['gru', 'lstm', 'rnn']:
             if 'use_bidirectional' in space:
                 hp['use_bidirectional'] = trial.suggest_categorical('use_bidirectional', space['use_bidirectional'])
             elif 'use_bidirectional' in cfg['model']['hyperparameters']:
@@ -474,6 +453,8 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     hp['lookback'] = actual_lookback
             
             # Using custom HF builder and PyTorch training loop
+            from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
+            
             if arch == 'patchtst_hf':
                 model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
             elif arch == 'autoformer_hf':
@@ -481,11 +462,12 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             else:
                 model = build_causal_transformer_hf(hp['lookback'], n_features, horizon, hp)
             # Make sure we pass batch_size, epochs etc. to PyTorch trainer
-            hp['batch_size'] = trial.suggest_categorical('batch_size', space.get('batch_size', [16, 32, 64, 128])) if 'batch_size' in space else cfg['training'].get('batch_size', 32)
+            if 'batch_size' not in hp:
+                hp['batch_size'] = cfg['training'].get('batch_size', 32)
             hp['epochs'] = 100 # Standard tuning limit
             hp['loss'] = loss_fn
             
-            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial)
+            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial, verbose=verbose)
             val_loss = min(history.history['val_loss'])
         else:
             if hp['lookback'] != actual_lookback:
@@ -500,10 +482,27 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
             pruning_cb = TFKerasPruningCallback(trial, 'val_loss')
 
+            import sys
+            class SingleLineTrainingCallback(tf.keras.callbacks.Callback):
+                def __init__(self, t_num):
+                    super().__init__()
+                    self.t_num = t_num
+                def on_epoch_end(self, epoch, logs=None):
+                    logs = logs or {}
+                    v_loss = logs.get('val_loss', 0.0)
+                    t_loss = logs.get('loss', 0.0)
+                    sys.stdout.write(f"\r  └➜ [Trial {self.t_num}] Epoch {epoch+1:03d}/100 | loss: {t_loss:.4f} | val_loss: {v_loss:.4f}     ")
+                    sys.stdout.flush()
+                def on_train_end(self, logs=None):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+            
+            sl_cb = SingleLineTrainingCallback(trial.number)
+            
             history = model.fit(
                 X_tr, y_tr, validation_data=(X_va, y_va),
                 epochs=100, batch_size=hp['batch_size'],
-                callbacks=[early_stop, pruning_cb], verbose=0
+                callbacks=[early_stop, pruning_cb, sl_cb], verbose=0
             )
             val_loss = min(history.history['val_loss'])
 

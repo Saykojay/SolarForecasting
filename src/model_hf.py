@@ -59,7 +59,7 @@ class CustomAutoformerForPrediction(nn.Module):
         # pass through Autoformer
         # cuFFT requires power-of-two sizes for half precision. 
         # We force float32 for the FFT part to support arbitrary lookback (like 72).
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             out = self.autoformer(
                 past_values=past_values.float(),
                 past_time_features=past_time_features.float(),
@@ -216,7 +216,7 @@ def build_causal_transformer_hf(lookback, n_features, forecast_horizon, hp: dict
     )
     return model
 
-def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=None, callbacks=None):
+def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience=10, callbacks=None, trial=None, verbose=True):
     """
     Custom PyTorch training loop to replicate Keras-like training process.
     Included Optuna pruning and EarlyStopping logic.
@@ -252,7 +252,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
     
     # Mixed Precision Setup for massive speedup and memory efficiency
     use_amp = torch.cuda.is_available()
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     
     class DummyHistory:
         def __init__(self):
@@ -270,12 +270,18 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
     for epoch in range(epochs):
         model.train()
         train_losses = []
-        for xb, yb in train_dl:
+        total_steps = len(train_dl)
+        
+        # Cetak info mulai epoch
+        if verbose:
+            print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})", flush=True)
+        
+        for step, (xb, yb) in enumerate(train_dl):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             
             # Predict using Mixed Precision Autocast
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 outputs = model(past_values=xb)
                 preds = outputs.prediction_outputs # shape (B, Horizon, Channels)
                 
@@ -290,6 +296,10 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
             scaler.update()
             
             train_losses.append(loss.item())
+            
+            # Print update every 20 steps or at the end
+            if verbose and ((step + 1) % 20 == 0 or (step + 1) == total_steps):
+                print(f"   [Batch {step+1:03d}/{total_steps:03d}] Loss sementara: {loss.item():.5f}", flush=True)
             
         model.eval()
         val_losses = []
@@ -312,6 +322,14 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
         if 'loss' not in history.history:
             history.history['loss'] = []
         history.history['loss'].append(train_loss_mean)
+        
+        # Real-time console log printed to terminal
+        import sys
+        if verbose:
+            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}", flush=True)
+        elif trial is not None:
+            sys.stdout.write(f"\r  └➜ [Trial {trial.number}] Epoch {epoch+1:03d}/{epochs} | loss: {train_loss_mean:.4f} | val_loss: {val_loss:.4f}     ")
+            sys.stdout.flush()
         
         # Trigger Keras-like Callbacks to update Streamlit UI
         if callbacks:
@@ -336,9 +354,15 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                logger.info(f"[PyTorch] EarlyStopping triggers at epoch {epoch+1}")
+                if verbose:
+                    logger.info(f"[PyTorch] EarlyStopping triggers at epoch {epoch+1}")
                 break
                 
+    if not verbose and trial is not None:
+        import sys
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        
     return history, model
 
 
