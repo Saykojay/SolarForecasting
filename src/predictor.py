@@ -463,7 +463,11 @@ def test_on_target(model_path: str, target_csv: str, cfg: dict):
     print(f"{'='*60}")
 
     # 1. Load model
-    model = tf.keras.models.load_model(model_path, custom_objects=get_custom_objects())
+    if model_path.endswith('model_hf'):
+        from src.model_hf import load_hf_wrapper
+        model = load_hf_wrapper(model_path)
+    else:
+        model = tf.keras.models.load_model(model_path, custom_objects=get_custom_objects())
     print(f"Model loaded: {model.name}")
 
     # 2. Load scalers

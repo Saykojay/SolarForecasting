@@ -82,9 +82,15 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
             hp['lookback'] = lookback
 
     n_features = data.get('n_features') or data['X_train'].shape[2]
-    model = build_model(arch, lookback, n_features, horizon, hp)
-    compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
-    model.summary()
+    
+    if arch == 'patchtst_hf':
+        from src.model_hf import build_patchtst_hf
+        model = build_patchtst_hf(lookback, n_features, horizon, hp)
+        # Note: compile_model is skipped
+    else:
+        model = build_model(arch, lookback, n_features, horizon, hp)
+        compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
+        model.summary()
 
     cbs = _get_callbacks(cfg)
     if extra_callbacks:
@@ -110,7 +116,16 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     total_epochs = cfg['training']['epochs']
     init_batch_size = hp['batch_size']
     
-    if use_batch_scheduling:
+    if arch == 'patchtst_hf':
+        from src.model_hf import train_eval_pytorch_model
+        # Use simple epochs since Custom PyTorch loop handles patience
+        hp['epochs'] = total_epochs
+        hp['batch_size'] = init_batch_size
+        hp['loss'] = loss_fn
+        history, model = train_eval_pytorch_model(
+            model, data['X_train'], data['y_train'], data['X_test'], data['y_test'], hp
+        )
+    elif use_batch_scheduling:
         print(f"\n📈 [Taktik 3] Batch Size Scheduling diaktifkan. Start Batch: {init_batch_size}")
         import copy
         from keras.callbacks import History
@@ -182,13 +197,18 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     training_duration = end_time - start_time
 
     # Save model
-    model_path = os.path.join(model_folder, "model.keras")
-    try:
-        model.save(model_path)
-    except Exception as e:
-        print(f"⚠️ Gagal menyimpan dalam format .keras ({e}), mencoba .h5...")
-        model_path = os.path.join(model_folder, "model.h5")
-        model.save(model_path)
+    if arch == 'patchtst_hf':
+        import torch
+        model_path = os.path.join(model_folder, "model_hf")
+        model.save_pretrained(model_path)
+    else:
+        model_path = os.path.join(model_folder, "model.keras")
+        try:
+            model.save(model_path)
+        except Exception as e:
+            print(f"⚠️ Gagal menyimpan dalam format .keras ({e}), mencoba .h5...")
+            model_path = os.path.join(model_folder, "model.h5")
+            model.save(model_path)
 
     # Copy Scalers from processed_dir to bundle (CRITICAL for Transfer Learning)
     import shutil
@@ -322,7 +342,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
 
         # Architecture-Specific Hyperparameters
-        if arch == 'patchtst':
+        if arch in ['patchtst', 'patchtst_hf']:
             if 'patch_len' in space:
                 hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
             else:
@@ -441,32 +461,47 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
         X_tr, y_tr = X_full[:n_train], y_full[:n_train]
         X_va, y_va = X_full[n_train:], y_full[n_train:]
 
-        model = build_model(arch, hp['lookback'], n_features, horizon, hp)
-
         # If lookback doesn't match, truncate/pad input
         actual_lookback = X_tr.shape[1]
-        if hp['lookback'] != actual_lookback:
-            if hp['lookback'] < actual_lookback:
-                X_tr = X_tr[:, -hp['lookback']:, :]
-                X_va = X_va[:, -hp['lookback']:, :]
-            else:
-                # Can't extend, use original lookback
-                hp['lookback'] = actual_lookback
-                model = build_model(arch, actual_lookback, n_features, horizon, hp)
+        
+        # Build model and train based on Architecture Type
+        if arch == 'patchtst_hf':
+            from src.model_hf import build_patchtst_hf, train_eval_pytorch_model
+            if hp['lookback'] != actual_lookback:
+                if hp['lookback'] < actual_lookback:
+                    X_tr = X_tr[:, -hp['lookback']:, :]
+                    X_va = X_va[:, -hp['lookback']:, :]
+                else:
+                    hp['lookback'] = actual_lookback
+            
+            # Using custom HF builder and PyTorch training loop
+            model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
+            # Make sure we pass batch_size, epochs etc. to PyTorch trainer
+            hp['batch_size'] = trial.suggest_categorical('batch_size', space.get('batch_size', [16, 32, 64, 128])) if 'batch_size' in space else cfg['training'].get('batch_size', 32)
+            hp['epochs'] = 100 # Standard tuning limit
+            hp['loss'] = loss_fn
+            
+            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial)
+            val_loss = min(history.history['val_loss'])
+        else:
+            if hp['lookback'] != actual_lookback:
+                if hp['lookback'] < actual_lookback:
+                    X_tr = X_tr[:, -hp['lookback']:, :]
+                    X_va = X_va[:, -hp['lookback']:, :]
+                else:
+                    hp['lookback'] = actual_lookback
+                    
+            model = build_model(arch, hp['lookback'], n_features, horizon, hp)
+            compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
+            early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+            pruning_cb = TFKerasPruningCallback(trial, 'val_loss')
 
-        compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
-        # Increase patience to 10 to give models more time to converge or plateu before dropping
-        early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-        # Add TFKerasPruningCallback to cut off unpromising trials in the middle of training (based on SuccessiveHalving)
-        pruning_cb = TFKerasPruningCallback(trial, 'val_loss')
-
-        history = model.fit(
-            X_tr, y_tr, validation_data=(X_va, y_va),
-            epochs=100, batch_size=hp['batch_size'],
-            callbacks=[early_stop, pruning_cb], verbose=0
-        )
-
-        val_loss = min(history.history['val_loss'])
+            history = model.fit(
+                X_tr, y_tr, validation_data=(X_va, y_va),
+                epochs=100, batch_size=hp['batch_size'],
+                callbacks=[early_stop, pruning_cb], verbose=0
+            )
+            val_loss = min(history.history['val_loss'])
 
         try:
             with mlflow.start_run(nested=True):

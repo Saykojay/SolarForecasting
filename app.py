@@ -1018,8 +1018,9 @@ with tab_eval:
                     if os.path.isdir(model_path):
                         model_root = model_path
                         # Try model.keras then model.h5
-                        possible_files = [os.path.join(model_path, 'model.keras'), 
-                                         os.path.join(model_path, 'model.h5')]
+                        possible_files = [os.path.join(model_path, 'model_hf'),
+                                  os.path.join(model_path, 'model.keras'), 
+                                  os.path.join(model_path, 'model.h5')]
                         found = False
                         for pf in possible_files:
                             if os.path.exists(pf):
@@ -1027,7 +1028,7 @@ with tab_eval:
                                 found = True
                                 break
                         if not found:
-                            st.error(f"Bundle model tidak valid (model.keras/h5 tidak ditemukan): {model_id}")
+                            st.error(f"Bundle model tidak valid (model.keras/h5/model_hf tidak ditemukan): {model_id}")
                             st.stop()
                     
                     if not os.path.exists(model_path):
@@ -1038,7 +1039,11 @@ with tab_eval:
                     custom_objs = get_custom_objects()
                     with tf.keras.utils.custom_object_scope(custom_objs):
                         # Use compile=False to avoid HDF5 object not found errors related to optimizer state
-                        model = tf.keras.models.load_model(model_path, compile=False)
+                        if model_path.endswith('model_hf'):
+                            from src.model_hf import load_hf_wrapper
+                            model = load_hf_wrapper(model_path)
+                        else:
+                            model = tf.keras.models.load_model(model_path, compile=False)
                     
                     # Re-compile manually with standard Adam
                     from src.model_factory import compile_model
@@ -1569,7 +1574,7 @@ with tab_train:
 
         with col_hp1:
             st.markdown("**Core Structure**")
-            _valid_archs = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+            _valid_archs = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
             _dummy = st.selectbox("Arsitektur Model", _valid_archs, 
                                   index=_valid_archs.index(arch) if arch in _valid_archs else 0,
                                   key="arch_selector_train",
@@ -1583,7 +1588,7 @@ with tab_train:
                                               value=hp.get('lookback', 72))
             
             # Adaptive Labels for Core Structure
-            if new_arch == "patchtst":
+            if new_arch in ["patchtst", "patchtst_hf"]:
                 d_label = "d_model (Embedding Dimension)"
                 l_label = "Transformer Blocks"
             elif new_arch == "timetracker":
@@ -1633,7 +1638,7 @@ with tab_train:
                                              min_value=0.0, max_value=0.9, step=0.01, format="%.2f")
             
             # --- ARCHITECTURE SPECIFIC PARAMS ---
-            if new_arch == "patchtst":
+            if new_arch in ["patchtst", "patchtst_hf"]:
                 with st.expander("🧩 PatchTST Specific Params", expanded=True):
                     hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
                     hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
@@ -1842,7 +1847,7 @@ with tab_batch:
             st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
             
             # 1. Architecture Selection
-            arch_list = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+            arch_list = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
             
             # Default to global active architecture if not set
             if 'batch_arch_selector' not in st.session_state:
@@ -1866,7 +1871,7 @@ with tab_batch:
                     'lookback': 72, 'learning_rate': 0.0001, 'batch_size': 32, 'dropout': 0.2, 'd_model': 64, 'n_layers': 2
                 }
                 
-                if q_arch_val == 'patchtst':
+                if q_arch_val in ['patchtst', 'patchtst_hf']:
                     q_hp.update(base_defaults)
                     q_hp.update({'d_model': 128, 'n_layers': 3, 'patch_len': 16, 'stride': 8, 'n_heads': 16, 'ff_dim': 256})
                     d_label, l_label = "d_model (Embedding)", "Transformer Blocks"
@@ -1900,7 +1905,7 @@ with tab_batch:
                     q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key=f"q_dr_{q_arch_val}")
 
                 # --- SPECIFIC PARAMS ---
-                if q_arch_val == "patchtst":
+                if q_arch_val in ["patchtst", "patchtst_hf"]:
                     st.markdown("---")
                     sq1, sq2 = st.columns(2)
                     with sq1:
@@ -2296,7 +2301,7 @@ with tab_tuning:
         if 'tune_arch_selector' not in st.session_state:
             st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
 
-        _valid_tune_archs = ["patchtst", "timetracker", "timeperceiver", "gru", "lstm", "rnn"]
+        _valid_tune_archs = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
         _current_tune_arch = cfg['model'].get('architecture', 'patchtst').lower()
         t_arch = st.selectbox("Arsitektur yang akan di-Tuning", _valid_tune_archs, 
                               index=_valid_tune_archs.index(_current_tune_arch) if _current_tune_arch in _valid_tune_archs else 0,
@@ -2329,7 +2334,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "timetracker", "autoformer"]:
+                if t_arch in ["patchtst", "patchtst_hf", "timetracker", "autoformer"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
@@ -2349,8 +2354,8 @@ with tab_tuning:
 
             with col_s2:
                 # Dynamic Search Space Labels
-                ss_d_label = "D_Model (Embedding)" if t_arch in ['patchtst', 'autoformer', 'timetracker'] else f"Hidden Units ({t_arch.upper()} Capacity)"
-                ss_l_label = "Layers (Transformer)" if t_arch in ['patchtst', 'autoformer', 'timetracker'] else f"Layers (Stacked {t_arch.upper()})"
+                ss_d_label = "D_Model (Embedding)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer', 'timetracker'] else f"Hidden Units ({t_arch.upper()} Capacity)"
+                ss_l_label = "Layers (Transformer)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer', 'timetracker'] else f"Layers (Stacked {t_arch.upper()})"
                 
                 st.markdown(f"**2. {t_arch.upper()} Capacity**")
                 d_vals = space.get('d_model', [64, 256])
@@ -2363,8 +2368,8 @@ with tab_tuning:
                 l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key="l_max_new")
                 space['n_layers'] = [l_min, l_max]
                 
-                if t_arch in ["patchtst", "timetracker"]:
-                    if t_arch == "patchtst":
+                if t_arch in ["patchtst", "patchtst_hf", "timetracker"]:
+                    if t_arch in ["patchtst", "patchtst_hf"]:
                         ff_vals = space.get('ff_dim', [128, 512])
                         ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
                         ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
@@ -2483,7 +2488,7 @@ with tab_tuning:
             fig_opt.add_trace(go.Scatter(
                 x=trial_nums, y=trial_values,
                 mode='markers', name='Trial Value',
-                marker=dict(size=8, color='#818cf8', opacity=0.6)
+                marker=dict(size=8, color='#818cf8', opacity=0.3)
             ))
             fig_opt.add_trace(go.Scatter(
                 x=trial_nums, y=best_so_far,
@@ -2702,14 +2707,21 @@ with tab_eval:
                             
                             if os.path.isdir(model_path):
                                 model_root = model_path
-                                for ext in ['model.keras', 'model.h5']:
-                                    if os.path.exists(os.path.join(model_path, ext)):
-                                        model_path = os.path.join(model_path, ext)
-                                        break
+                                if os.path.exists(os.path.join(model_path, 'model_hf')):
+                                    model_path = os.path.join(model_path, 'model_hf')
+                                else:
+                                    for ext in ['model.keras', 'model.h5']:
+                                        if os.path.exists(os.path.join(model_path, ext)):
+                                            model_path = os.path.join(model_path, ext)
+                                            break
                                         
                             custom_objs = get_custom_objects()
                             with tf.keras.utils.custom_object_scope(custom_objs):
-                                model = tf.keras.models.load_model(model_path, compile=False)
+                                if model_path.endswith('model_hf'):
+                                    from src.model_hf import load_hf_wrapper
+                                    model = load_hf_wrapper(model_path)
+                                else:
+                                    model = tf.keras.models.load_model(model_path, compile=False)
                             
                             compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                             scaler_dir = model_root if os.path.isdir(model_root) else None
@@ -3251,15 +3263,22 @@ with tab_compare:
                                 model_root = model_dir
                                 if os.path.isdir(model_path):
                                     model_root = model_path
-                                    for ext in ['model.keras', 'model.h5']:
-                                        if os.path.exists(os.path.join(model_path, ext)):
-                                            model_path = os.path.join(model_path, ext)
-                                            break
+                                    if os.path.exists(os.path.join(model_path, 'model_hf')):
+                                        model_path = os.path.join(model_path, 'model_hf')
+                                    else:
+                                        for ext in ['model.keras', 'model.h5']:
+                                            if os.path.exists(os.path.join(model_path, ext)):
+                                                model_path = os.path.join(model_path, ext)
+                                                break
                                 
                                 # 3. Load Model
                                 custom_objs = get_custom_objects()
                                 with tf.keras.utils.custom_object_scope(custom_objs):
-                                    model = tf.keras.models.load_model(model_path, compile=False)
+                                    if model_path.endswith('model_hf'):
+                                        from src.model_hf import load_hf_wrapper
+                                        model = load_hf_wrapper(model_path)
+                                    else:
+                                        model = tf.keras.models.load_model(model_path, compile=False)
                                 
                                 compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                                 
