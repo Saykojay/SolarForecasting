@@ -23,12 +23,14 @@ def build_patchtst_hf(lookback, n_features, forecast_horizon, hp: dict):
         prediction_length=forecast_horizon,
         num_input_channels=n_features,
         patch_length=patch_len,
-        stride=stride,
+        patch_stride=stride,
         d_model=d_model,
-        encoder_layers=n_layers,
-        encoder_attention_heads=n_heads,
-        dropout=dropout,
+        num_hidden_layers=n_layers,
+        num_attention_heads=n_heads,
+        ffn_dim=hp.get('ff_dim', d_model*2),
         attention_dropout=dropout,
+        ff_dropout=dropout,
+        head_dropout=dropout,
         use_cache=False
     )
     
