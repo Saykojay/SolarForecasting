@@ -59,7 +59,7 @@ class CustomAutoformerForPrediction(nn.Module):
         # pass through Autoformer
         # cuFFT requires power-of-two sizes for half precision. 
         # We force float32 for the FFT part to support arbitrary lookback (like 72).
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             out = self.autoformer(
                 past_values=past_values.float(),
                 past_time_features=past_time_features.float(),
@@ -252,7 +252,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
     
     # Mixed Precision Setup for massive speedup and memory efficiency
     use_amp = torch.cuda.is_available()
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     
     class DummyHistory:
         def __init__(self):
@@ -275,7 +275,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
             optimizer.zero_grad()
             
             # Predict using Mixed Precision Autocast
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.amp.autocast('cuda', enabled=use_amp):
                 outputs = model(past_values=xb)
                 preds = outputs.prediction_outputs # shape (B, Horizon, Channels)
                 
@@ -312,6 +312,9 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
         if 'loss' not in history.history:
             history.history['loss'] = []
         history.history['loss'].append(train_loss_mean)
+        
+        # Real-time console log printed to terminal
+        print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}", flush=True)
         
         # Trigger Keras-like Callbacks to update Streamlit UI
         if callbacks:
