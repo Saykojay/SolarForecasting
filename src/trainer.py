@@ -13,8 +13,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime
 import logging
 import joblib
-from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
-
 logger = logging.getLogger(__name__)
 # Ensure basic logging is configured if not already
 if not logger.handlers:
@@ -84,12 +82,14 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     n_features = data.get('n_features') or data['X_train'].shape[2]
     
-    if arch == 'patchtst_hf':
-        model = build_patchtst_hf(lookback, n_features, horizon, hp)
-    elif arch == 'autoformer_hf':
-        model = build_autoformer_hf(lookback, n_features, horizon, hp)
-    elif arch == 'causal_transformer_hf':
-        model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
+    if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+        from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf
+        if arch == 'patchtst_hf':
+            model = build_patchtst_hf(lookback, n_features, horizon, hp)
+        elif arch == 'autoformer_hf':
+            model = build_autoformer_hf(lookback, n_features, horizon, hp)
+        elif arch == 'causal_transformer_hf':
+            model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
     else:
         model = build_model(arch, lookback, n_features, horizon, hp)
         compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
@@ -128,6 +128,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
         cbs.extend(extra_callbacks)
 
     if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+        from src.model_hf import train_eval_pytorch_model
         # Use simple epochs since Custom PyTorch loop handles patience
         hp['epochs'] = total_epochs
         hp['batch_size'] = init_batch_size
@@ -474,6 +475,8 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     hp['lookback'] = actual_lookback
             
             # Using custom HF builder and PyTorch training loop
+            from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
+            
             if arch == 'patchtst_hf':
                 model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
             elif arch == 'autoformer_hf':
