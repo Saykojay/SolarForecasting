@@ -2476,8 +2476,8 @@ with tab_tuning:
                 l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key=f"l_max_{t_arch}")
                 space['n_layers'] = [l_min, l_max]
                 
-                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker"]:
-                    if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
+                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "autoformer", "causal_transformer_hf", "timetracker"]:
+                    if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "autoformer", "causal_transformer_hf"]:
                         ff_vals = space.get('ff_dim', [128, 512])
                         ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key=f"ff_min_{t_arch}")
                         ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key=f"ff_max_{t_arch}")
@@ -2503,12 +2503,6 @@ with tab_tuning:
                     tk_min = st.number_input("Top-K Min", 1, 8, tk_vals[0], 1, key=f"tk_min_{t_arch}")
                     tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key=f"tk_max_{t_arch}")
                     space['top_k'] = [tk_min, tk_max]
-
-                if t_arch in ["autoformer", "autoformer_hf"]:
-                    ff_vals = space.get('ff_dim', [128, 512])
-                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key=f"af_ff_min_{t_arch}")
-                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key=f"af_ff_max_{t_arch}")
-                    space['ff_dim'] = [ff_min, ff_max]
 
                 dr_vals = space.get('dropout', [0.05, 0.3])
                 dr_min = st.number_input("Dropout Min", 0.0, 0.5, dr_vals[0], 0.05, key="dr_min_new")
