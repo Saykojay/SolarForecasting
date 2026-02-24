@@ -272,7 +272,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 # ============================================================
 # OPTUNA HYPERPARAMETER TUNING
 # ============================================================
-def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
+def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse', verbose: bool = True):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
     try:
@@ -489,7 +489,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             hp['epochs'] = 100 # Standard tuning limit
             hp['loss'] = loss_fn
             
-            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial)
+            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial, verbose=verbose)
             val_loss = min(history.history['val_loss'])
         else:
             if hp['lookback'] != actual_lookback:
@@ -507,7 +507,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             history = model.fit(
                 X_tr, y_tr, validation_data=(X_va, y_va),
                 epochs=100, batch_size=hp['batch_size'],
-                callbacks=[early_stop, pruning_cb], verbose=1
+                callbacks=[early_stop, pruning_cb], verbose=1 if verbose else 0
             )
             val_loss = min(history.history['val_loss'])
 

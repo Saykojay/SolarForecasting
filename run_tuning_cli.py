@@ -98,8 +98,8 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
     print("\nMenunggu GPU bersiap...")
     time.sleep(3)
     
-    # Run the tuning Engine
-    best_params, study = run_optuna_tuning(cfg=cfg, force_cpu=False)
+    # Run the tuning Engine (Quiet mode for CLI so it doesn't spam console too heavily)
+    best_params, study = run_optuna_tuning(cfg=cfg, force_cpu=False, verbose=False)
     
     # Save Result to separate CSV to avoid overwriting Streamlit's file
     timestamp = datetime.now().strftime("%y%m%d_%H%M")
