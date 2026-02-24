@@ -2509,11 +2509,6 @@ with tab_tuning:
                     ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key=f"af_ff_min_{t_arch}")
                     ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key=f"af_ff_max_{t_arch}")
                     space['ff_dim'] = [ff_min, ff_max]
-                    
-                    ma_vals = space.get('moving_avg', [25, 25])
-                    ma_min = st.number_input("Moving Avg Min", 1, 65, ma_vals[0], 2, key=f"ma_min_{t_arch}")
-                    ma_max = st.number_input("Moving Avg Max", ma_min, 65, ma_vals[1], 2, key=f"ma_max_{t_arch}")
-                    space['moving_avg'] = [ma_min, ma_max]
 
                 dr_vals = space.get('dropout', [0.05, 0.3])
                 dr_min = st.number_input("Dropout Min", 0.0, 0.5, dr_vals[0], 0.05, key="dr_min_new")
