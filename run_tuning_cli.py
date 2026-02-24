@@ -71,6 +71,19 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
             'batch_size': [128, 128], # Dikunci demi konsistensi Transformer VRAM
             'lookback': [96, 336, 24] # Minimal 4 hari (96 jam) agar pola musim terlihat
         }
+    elif arch_name == 'causal_transformer_hf':
+        cfg['tuning']['search_space'] = {
+            'patch_len': [8, 32, 8],
+            'stride': [4, 16, 4],
+            'd_model': [64, 128],
+            'n_layers': [2, 4],
+            'n_heads': [4, 8, 16],
+            'ff_dim': [128, 512],
+            'dropout': [0.1, 0.4],
+            'learning_rate': [5e-5, 1e-3],
+            'batch_size': [128, 128], # DIKUNCI MATI di 128 sesuai request user
+            'lookback': [168, 336, 24]
+        }
     else:
         print(f"⚠️ Search space default digunakan untuk {arch_name}.")
         
@@ -99,7 +112,7 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Jalankan Optuna Tuning secara Paksa via CLI (Paralel dengan UI).")
-    parser.add_argument("arch", type=str, choices=['gru', 'lstm', 'rnn', 'patchtst', 'patchtst_hf', 'timetracker'], help="Arsitektur model yang ingin di-tuning (contoh: rnn)")
+    parser.add_argument("arch", type=str, choices=['gru', 'lstm', 'rnn', 'patchtst', 'patchtst_hf', 'timetracker', 'autoformer_hf', 'autoformer', 'causal_transformer_hf'], help="Arsitektur model yang ingin di-tuning (contoh: rnn)")
     parser.add_argument("--trials", type=int, default=50, help="Jumlah percobaan Optuna")
     parser.add_argument("--subsample", action='store_true', help="Aktifkan fitur subsample data agar cepat")
     parser.add_argument("--ratio", type=float, default=0.2, help="Rasio subsample data (0.05 s/d 1.0)")
