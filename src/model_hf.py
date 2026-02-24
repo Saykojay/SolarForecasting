@@ -270,7 +270,12 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
     for epoch in range(epochs):
         model.train()
         train_losses = []
-        for xb, yb in train_dl:
+        total_steps = len(train_dl)
+        
+        # Cetak info mulai epoch
+        print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})", flush=True)
+        
+        for step, (xb, yb) in enumerate(train_dl):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             
@@ -290,6 +295,10 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
             scaler.update()
             
             train_losses.append(loss.item())
+            
+            # Print update every 20 steps or at the end
+            if (step + 1) % 20 == 0 or (step + 1) == total_steps:
+                print(f"   [Batch {step+1:03d}/{total_steps:03d}] Loss sementara: {loss.item():.5f}", flush=True)
             
         model.eval()
         val_losses = []
