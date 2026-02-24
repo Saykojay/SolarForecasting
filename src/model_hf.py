@@ -216,7 +216,7 @@ def build_causal_transformer_hf(lookback, n_features, forecast_horizon, hp: dict
     )
     return model
 
-def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=None, callbacks=None):
+def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience=10, callbacks=None, trial=None, verbose=True):
     """
     Custom PyTorch training loop to replicate Keras-like training process.
     Included Optuna pruning and EarlyStopping logic.
@@ -273,7 +273,8 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
         total_steps = len(train_dl)
         
         # Cetak info mulai epoch
-        print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})", flush=True)
+        if verbose:
+            print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})", flush=True)
         
         for step, (xb, yb) in enumerate(train_dl):
             xb, yb = xb.to(device), yb.to(device)
@@ -297,7 +298,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
             train_losses.append(loss.item())
             
             # Print update every 20 steps or at the end
-            if (step + 1) % 20 == 0 or (step + 1) == total_steps:
+            if verbose and ((step + 1) % 20 == 0 or (step + 1) == total_steps):
                 print(f"   [Batch {step+1:03d}/{total_steps:03d}] Loss sementara: {loss.item():.5f}", flush=True)
             
         model.eval()
@@ -323,7 +324,8 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, trial=No
         history.history['loss'].append(train_loss_mean)
         
         # Real-time console log printed to terminal
-        print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}", flush=True)
+        if verbose:
+            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}", flush=True)
         
         # Trigger Keras-like Callbacks to update Streamlit UI
         if callbacks:
