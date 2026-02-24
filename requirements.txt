@@ -5,9 +5,14 @@ scikit-learn
 joblib
 
 # Deep Learning
-# (TensorFlow dan PyTorch bawaan Cloud Server disarankan digunakan agar tidak menimpa versi CUDA)
-# torch  # Uncomment for local CPU install
+# (Gunakan versi cu118 / cu121 untuk RunPod)
+torch
+torchvision
+torchaudio
 transformers
+accelerate
+evaluate
+datasets
 # Experiment Tracking
 optuna
 optuna-integration

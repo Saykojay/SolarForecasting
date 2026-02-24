@@ -13,6 +13,8 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime
 import logging
 import joblib
+from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
+
 logger = logging.getLogger(__name__)
 # Ensure basic logging is configured if not already
 if not logger.handlers:
@@ -82,14 +84,12 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     n_features = data.get('n_features') or data['X_train'].shape[2]
     
-    if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
-        from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf
-        if arch == 'patchtst_hf':
-            model = build_patchtst_hf(lookback, n_features, horizon, hp)
-        elif arch == 'autoformer_hf':
-            model = build_autoformer_hf(lookback, n_features, horizon, hp)
-        elif arch == 'causal_transformer_hf':
-            model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
+    if arch == 'patchtst_hf':
+        model = build_patchtst_hf(lookback, n_features, horizon, hp)
+    elif arch == 'autoformer_hf':
+        model = build_autoformer_hf(lookback, n_features, horizon, hp)
+    elif arch == 'causal_transformer_hf':
+        model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
     else:
         model = build_model(arch, lookback, n_features, horizon, hp)
         compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
@@ -128,7 +128,6 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
         cbs.extend(extra_callbacks)
 
     if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
-        from src.model_hf import train_eval_pytorch_model
         # Use simple epochs since Custom PyTorch loop handles patience
         hp['epochs'] = total_epochs
         hp['batch_size'] = init_batch_size
@@ -272,7 +271,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 # ============================================================
 # OPTUNA HYPERPARAMETER TUNING
 # ============================================================
-def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse', verbose: bool = True):
+def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None, force_cpu: bool = False, loss_fn: str = 'mse'):
     """Menjalankan Optuna untuk mencari hyperparameter terbaik."""
     import optuna
     try:
@@ -475,8 +474,6 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     hp['lookback'] = actual_lookback
             
             # Using custom HF builder and PyTorch training loop
-            from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
-            
             if arch == 'patchtst_hf':
                 model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
             elif arch == 'autoformer_hf':
@@ -484,12 +481,11 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             else:
                 model = build_causal_transformer_hf(hp['lookback'], n_features, horizon, hp)
             # Make sure we pass batch_size, epochs etc. to PyTorch trainer
-            if 'batch_size' not in hp:
-                hp['batch_size'] = cfg['training'].get('batch_size', 32)
+            hp['batch_size'] = trial.suggest_categorical('batch_size', space.get('batch_size', [16, 32, 64, 128])) if 'batch_size' in space else cfg['training'].get('batch_size', 32)
             hp['epochs'] = 100 # Standard tuning limit
             hp['loss'] = loss_fn
             
-            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial, verbose=verbose)
+            history, model = train_eval_pytorch_model(model, X_tr, y_tr, X_va, y_va, hp, trial=trial)
             val_loss = min(history.history['val_loss'])
         else:
             if hp['lookback'] != actual_lookback:
@@ -507,7 +503,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
             history = model.fit(
                 X_tr, y_tr, validation_data=(X_va, y_va),
                 epochs=100, batch_size=hp['batch_size'],
-                callbacks=[early_stop, pruning_cb], verbose=1 if verbose else 0
+                callbacks=[early_stop, pruning_cb], verbose=0
             )
             val_loss = min(history.history['val_loss'])
 
