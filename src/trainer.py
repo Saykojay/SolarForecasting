@@ -435,8 +435,10 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                 hp['n_heads'] = max(valid_heads) if valid_heads else max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
 
         else:
-            # For non-PatchTST/TimeTracker/Autoformer models like GRU/LSTM/RNN, preserve specific params from cfg
-            if 'use_bidirectional' in cfg['model']['hyperparameters']:
+            # For non-PatchTST/TimeTracker/Autoformer models like GRU/LSTM/RNN, allow tuning bidirectional feature
+            if 'use_bidirectional' in space:
+                hp['use_bidirectional'] = trial.suggest_categorical('use_bidirectional', space['use_bidirectional'])
+            elif 'use_bidirectional' in cfg['model']['hyperparameters']:
                 hp['use_bidirectional'] = cfg['model']['hyperparameters']['use_bidirectional']
             if 'use_revin' in cfg['model']['hyperparameters']:
                 hp['use_revin'] = cfg['model']['hyperparameters']['use_revin']

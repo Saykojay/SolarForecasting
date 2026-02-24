@@ -2419,8 +2419,30 @@ with tab_tuning:
                     space['stride'] = [s_min, s_max, s_step]
                 else:
                     st.markdown(f"**1. {t_arch.upper()} Configuration**")
-                    st.info("Parameter patching tidak tersedia untuk arsitektur GRU.")
-                    # Ensure they aren't in space to avoid confusion (optional)
+                    st.info("Parameter patching tidak tersedia untuk arsitektur ini.")
+                    
+                    # Bidirectional tuning space
+                    bi_vals = space.get('use_bidirectional', [True, False])
+                    if not isinstance(bi_vals, list):
+                        bi_vals = [bi_vals]
+                    
+                    bi_options = ["True", "False"]
+                    default_vals = ["True"] if True in bi_vals else []
+                    if False in bi_vals:
+                        default_vals.append("False")
+                        
+                    bi_sel = st.multiselect("Bandingkan Mode Bidirectional:", bi_options, default=default_vals, key=f"bi_sel_{t_arch}",
+                                            help="Pilih opsi yang ingin dicoba oleh Optuna. Jika memilih keduanya, Optuna akan mengundi mana yang lebih baik.")
+                    
+                    if not bi_sel:
+                        st.warning("Minimal pilih satu mode (True atau False).")
+                        bi_sel = ["True"] # fail-safe
+                    
+                    space['use_bidirectional'] = [True if v == "True" else False for v in bi_sel]
+                    
+                    # Clean up unused patch params from space if transitioning from PatchTST
+                    for k in ['patch_len', 'stride', 'n_heads', 'ff_dim', 'top_k', 'n_shared_experts', 'n_private_experts', 'moving_avg']:
+                        space.pop(k, None)
 
             with col_s2:
                 # Dynamic Search Space Labels

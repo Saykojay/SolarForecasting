@@ -37,24 +37,22 @@ mlflow:
   experiment_name: PatchTST_CSI_TransferLearning
   tracking_uri: mlruns
 model:
-  architecture: autoformer
+  architecture: gru
   hyperparameters:
     batch_size: 32
-    d_model: 128
+    d_model: 64
     dropout: 0.2
-    ff_dim: 256
-    learning_rate: 0.0001
+    learning_rate: 0.001
     lookback: 168
     loss_fn: huber
     moving_avg: 25
-    n_heads: 16
-    n_layers: 3
-    patch_len: 16
-    stride: 8
+    n_layers: 2
+    use_bidirectional: true
+    use_revin: false
 paths:
   logs_dir: logs
   models_dir: models
-  processed_dir: data/processed
+  processed_dir: data/processed/v8_vol6
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
@@ -98,20 +96,20 @@ tuning:
     - 32
     - 32
     d_model:
-    - 16
+    - 64
     - 256
     dropout:
     - 0.1
-    - 0.5
+    - 0.3
     ff_dim:
     - 128
     - 512
     learning_rate:
-    - 1.0e-05
-    - 0.1
+    - 0.0005
+    - 0.005
     lookback:
     - 24
-    - 72
+    - 120
     - 24
     moving_avg:
     - 25
