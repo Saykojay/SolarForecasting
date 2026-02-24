@@ -5,8 +5,9 @@ scikit-learn
 joblib
 
 # Deep Learning
-# (TensorFlow dihapus agar tidak menimpa versi khusus GPU bawaan RunPod)
-
+# (TensorFlow dan PyTorch bawaan Cloud Server disarankan digunakan agar tidak menimpa versi CUDA)
+# torch  # Uncomment for local CPU install
+transformers
 # Experiment Tracking
 optuna
 optuna-integration

@@ -4,6 +4,32 @@ Jalankan: streamlit run app.py
 """
 import os
 import sys
+
+# ============================================================
+# PYTORCH WINDOWS DLL & INITIALIZATION FIX
+# ============================================================
+if os.name == 'nt':
+    # Avoid DLL init failure on Windows by pre-loading torch lib if possible
+    # and setting duplicate lib OK for OpenMP conflicts
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    os.environ["CUDA_MODULE_LOADING"] = "LAZY"
+    
+    # Try to add torch lib to DLL directory search
+    try:
+        import torch
+        # Add Torch's own DLL directory to the path if it exists
+        torch_lib_path = os.path.join(os.path.dirname(torch.__file__), 'lib')
+        if os.path.exists(torch_lib_path):
+            os.add_dll_directory(torch_lib_path)
+            
+        # Optional: Force CUDA initialization before TensorFlow claims the entire GPU
+        if torch.cuda.is_available():
+            torch.cuda.init()
+            # print(f"[PyTorch] CUDA claimed: {torch.cuda.get_device_name(0)}")
+    except Exception as e:
+        # Silently fail if torch isn't installed or has early errors
+        pass
+
 import json
 import time
 import copy
@@ -127,7 +153,7 @@ st.markdown("""
     }
     .metric-card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(99, 102, 241, 0.15);
+        box_shadow: 0 8px 24px rgba(99, 102, 241, 0.15);
     }
     .metric-value {
         font-family: 'Manrope', sans-serif !important;
@@ -1044,10 +1070,9 @@ with tab_eval:
                             model = load_hf_wrapper(model_path)
                         else:
                             model = tf.keras.models.load_model(model_path, compile=False)
-                    
-                    # Re-compile manually with standard Adam
-                    from src.model_factory import compile_model
-                    compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                            # Re-compile manually with standard Adam
+                            from src.model_factory import compile_model
+                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                     
                     # Use model root for scalers
                     scaler_dir = model_root if os.path.isdir(model_root) else None
@@ -1186,7 +1211,8 @@ with tab_eval:
                     st.code(stdout_capture.getvalue(), language="text")
             except Exception as e:
                 st.error(f"Error: {e}")
-            st.rerun()
+                import traceback
+                st.code(traceback.format_exc())
 
     # Move run_tune and run_tscv to their respective tabs
 
@@ -1542,6 +1568,12 @@ with tab_train:
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 
                     'stride': 8, 'n_heads': 16
                 })
+            elif new_a in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']: # New HF Models
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
+                    'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 
+                    'stride': 8, 'n_heads': 16
+                })
             elif new_a == 'timetracker':
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.0005, 
@@ -1562,11 +1594,12 @@ with tab_train:
                 })
             
             # C-Delete keys that are no longer relevant to avoid config pollution
-            if new_a != 'patchtst':
-                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim']:
+            if new_a not in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'timetracker', 'timeperceiver']:
+                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim', 'n_shared_experts', 'n_private_experts', 'top_k', 'n_latent_tokens']:
                     cfg['model']['hyperparameters'].pop(k, None)
-            else:
-                cfg['model']['hyperparameters'].pop('use_bidirectional', None)
+            elif new_a not in ['gru', 'lstm', 'rnn']:
+                for k in ['use_bidirectional', 'use_revin']:
+                    cfg['model']['hyperparameters'].pop(k, None)
             
             save_config_to_file(cfg)
             st.session_state.cfg = cfg
@@ -1574,7 +1607,7 @@ with tab_train:
 
         with col_hp1:
             st.markdown("**Core Structure**")
-            _valid_archs = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
+            _valid_archs = ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
             _dummy = st.selectbox("Arsitektur Model", _valid_archs, 
                                   index=_valid_archs.index(arch) if arch in _valid_archs else 0,
                                   key="arch_selector_train",
@@ -1588,7 +1621,7 @@ with tab_train:
                                               value=hp.get('lookback', 72))
             
             # Adaptive Labels for Core Structure
-            if new_arch in ["patchtst", "patchtst_hf"]:
+            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
                 d_label = "d_model (Embedding Dimension)"
                 l_label = "Transformer Blocks"
             elif new_arch == "timetracker":
@@ -1638,7 +1671,7 @@ with tab_train:
                                              min_value=0.0, max_value=0.9, step=0.01, format="%.2f")
             
             # --- ARCHITECTURE SPECIFIC PARAMS ---
-            if new_arch in ["patchtst", "patchtst_hf"]:
+            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
                 with st.expander("🧩 PatchTST Specific Params", expanded=True):
                     hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
                     hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
@@ -1731,7 +1764,13 @@ with tab_train:
                     def on_epoch_end(self, epoch, logs=None):
                         elapsed = time.time() - self.start_time
                         total_epochs = self.forced_total_epochs if self.forced_total_epochs else self.params['epochs']
-                        current_lr = float(tf.keras.backend.get_value(self.model.optimizer.lr))
+                        try:
+                            current_lr = float(tf.keras.backend.get_value(self.model.optimizer.lr))
+                        except Exception:
+                            try:
+                                current_lr = float(cfg['model']['hyperparameters'].get('learning_rate', 0.0001))
+                            except Exception:
+                                current_lr = 0.0001
                         loss = logs.get('loss', 0); val_loss = logs.get('val_loss', 0)
                         progress = (epoch + 1) / total_epochs
                         avg_per_epoch = elapsed / (epoch + 1)
@@ -1846,8 +1885,7 @@ with tab_batch:
         with col_bq1:
             st.markdown(f"#### {gt('add_to_queue', st.session_state.lang)}")
             
-            # 1. Architecture Selection
-            arch_list = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
+            arch_list = ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
             
             # Default to global active architecture if not set
             if 'batch_arch_selector' not in st.session_state:
@@ -1871,7 +1909,7 @@ with tab_batch:
                     'lookback': 72, 'learning_rate': 0.0001, 'batch_size': 32, 'dropout': 0.2, 'd_model': 64, 'n_layers': 2
                 }
                 
-                if q_arch_val in ['patchtst', 'patchtst_hf']:
+                if q_arch_val in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
                     q_hp.update(base_defaults)
                     q_hp.update({'d_model': 128, 'n_layers': 3, 'patch_len': 16, 'stride': 8, 'n_heads': 16, 'ff_dim': 256})
                     d_label, l_label = "d_model (Embedding)", "Transformer Blocks"
@@ -1905,7 +1943,7 @@ with tab_batch:
                     q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key=f"q_dr_{q_arch_val}")
 
                 # --- SPECIFIC PARAMS ---
-                if q_arch_val in ["patchtst", "patchtst_hf"]:
+                if q_arch_val in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
                     st.markdown("---")
                     sq1, sq2 = st.columns(2)
                     with sq1:
@@ -2301,7 +2339,7 @@ with tab_tuning:
         if 'tune_arch_selector' not in st.session_state:
             st.session_state.tune_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
 
-        _valid_tune_archs = ["patchtst", "patchtst_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
+        _valid_tune_archs = ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "timeperceiver", "autoformer", "gru", "lstm", "rnn"]
         _current_tune_arch = cfg['model'].get('architecture', 'patchtst').lower()
         t_arch = st.selectbox("Arsitektur yang akan di-Tuning", _valid_tune_archs, 
                               index=_valid_tune_archs.index(_current_tune_arch) if _current_tune_arch in _valid_tune_archs else 0,
@@ -2334,7 +2372,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "patchtst_hf", "timetracker", "autoformer"]:
+                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "autoformer"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
@@ -2354,8 +2392,8 @@ with tab_tuning:
 
             with col_s2:
                 # Dynamic Search Space Labels
-                ss_d_label = "D_Model (Embedding)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer', 'timetracker'] else f"Hidden Units ({t_arch.upper()} Capacity)"
-                ss_l_label = "Layers (Transformer)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer', 'timetracker'] else f"Layers (Stacked {t_arch.upper()})"
+                ss_d_label = "D_Model (Embedding)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer', 'timetracker'] else f"Hidden Units ({t_arch.upper()} Capacity)"
+                ss_l_label = "Layers (Transformer)" if t_arch in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer', 'timetracker'] else f"Layers (Stacked {t_arch.upper()})"
                 
                 st.markdown(f"**2. {t_arch.upper()} Capacity**")
                 d_vals = space.get('d_model', [64, 256])
@@ -2368,8 +2406,8 @@ with tab_tuning:
                 l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key="l_max_new")
                 space['n_layers'] = [l_min, l_max]
                 
-                if t_arch in ["patchtst", "patchtst_hf", "timetracker"]:
-                    if t_arch in ["patchtst", "patchtst_hf"]:
+                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker"]:
+                    if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
                         ff_vals = space.get('ff_dim', [128, 512])
                         ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
                         ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
@@ -2396,7 +2434,7 @@ with tab_tuning:
                     tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key="tk_max_new")
                     space['top_k'] = [tk_min, tk_max]
 
-                if t_arch == "autoformer":
+                if t_arch in ["autoformer", "autoformer_hf"]:
                     ff_vals = space.get('ff_dim', [128, 512])
                     ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="af_ff_min")
                     ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="af_ff_max")
@@ -2722,8 +2760,8 @@ with tab_eval:
                                     model = load_hf_wrapper(model_path)
                                 else:
                                     model = tf.keras.models.load_model(model_path, compile=False)
+                                    compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                             
-                            compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                             scaler_dir = model_root if os.path.isdir(model_root) else None
                             
                             data = st.session_state.get('prep_metadata', None)
@@ -3279,8 +3317,7 @@ with tab_compare:
                                         model = load_hf_wrapper(model_path)
                                     else:
                                         model = tf.keras.models.load_model(model_path, compile=False)
-                                
-                                compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
+                                        compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                                 
                                 # 4. Run Evaluation
                                 res = None

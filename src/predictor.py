@@ -282,12 +282,20 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         pv_cs_test = df_test['pv_clear_sky'].values[test_idx_local[:, np.newaxis] + steps]
 
         # CSI -> Power
-        pv_train_pred = np.clip(y_train_pred_raw * pv_cs_train, 0, pv_cfg['nameplate_capacity_kw'])
-        pv_test_pred = np.clip(y_test_pred_raw * pv_cs_test, 0, pv_cfg['nameplate_capacity_kw'])
+        if len(y_train_pred_raw.shape) == 3 and y_train_pred_raw.shape[2] == 1:
+            pv_train_pred = np.clip(y_train_pred_raw[:, :, 0] * pv_cs_train, 0, pv_cfg['nameplate_capacity_kw'])
+            pv_test_pred = np.clip(y_test_pred_raw[:, :, 0] * pv_cs_test, 0, pv_cfg['nameplate_capacity_kw'])
+        else:
+            pv_train_pred = np.clip(y_train_pred_raw * pv_cs_train, 0, pv_cfg['nameplate_capacity_kw'])
+            pv_test_pred = np.clip(y_test_pred_raw * pv_cs_test, 0, pv_cfg['nameplate_capacity_kw'])
     else:
         # Already power
-        pv_train_pred = np.clip(y_train_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
-        pv_test_pred = np.clip(y_test_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
+        if len(y_train_pred_raw.shape) == 3 and y_train_pred_raw.shape[2] == 1:
+            pv_train_pred = np.clip(y_train_pred_raw[:, :, 0], 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
+            pv_test_pred = np.clip(y_test_pred_raw[:, :, 0], 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
+        else:
+            pv_train_pred = np.clip(y_train_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
+            pv_test_pred = np.clip(y_test_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
         
         # Need match indices for actuals too
         _, _, train_idx_local = create_sequences_with_indices(

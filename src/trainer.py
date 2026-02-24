@@ -13,6 +13,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime
 import logging
 import joblib
+from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf, train_eval_pytorch_model
 
 logger = logging.getLogger(__name__)
 # Ensure basic logging is configured if not already
@@ -84,20 +85,17 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     n_features = data.get('n_features') or data['X_train'].shape[2]
     
     if arch == 'patchtst_hf':
-        from src.model_hf import build_patchtst_hf
         model = build_patchtst_hf(lookback, n_features, horizon, hp)
-        # Note: compile_model is skipped
+    elif arch == 'autoformer_hf':
+        model = build_autoformer_hf(lookback, n_features, horizon, hp)
+    elif arch == 'causal_transformer_hf':
+        model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
     else:
         model = build_model(arch, lookback, n_features, horizon, hp)
         compile_model(model, hp['learning_rate'], loss_fn=loss_fn)
         model.summary()
 
-    cbs = _get_callbacks(cfg)
-    if extra_callbacks:
-        cbs.extend(extra_callbacks)
-
-    import time
-    start_time = time.time()
+    # Define callbacks later when evaluating model paths
     
     # Create model folder for bundling
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -116,14 +114,27 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     total_epochs = cfg['training']['epochs']
     init_batch_size = hp['batch_size']
     
-    if arch == 'patchtst_hf':
-        from src.model_hf import train_eval_pytorch_model
+    # Initialize Callbacks before using them
+    cbs = _get_callbacks(cfg)
+    if extra_callbacks:
+        for cb in extra_callbacks:
+            if hasattr(cb, 'on_train_begin'):
+                cb.on_train_begin()
+    
+    import time
+    start_time = time.time()
+    
+    if extra_callbacks:
+        cbs.extend(extra_callbacks)
+
+    if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
         # Use simple epochs since Custom PyTorch loop handles patience
         hp['epochs'] = total_epochs
         hp['batch_size'] = init_batch_size
         hp['loss'] = loss_fn
+        # Send only UI callbacks so Streamlit UI updates per epoch without crashing via Keras EarlyStopping
         history, model = train_eval_pytorch_model(
-            model, data['X_train'], data['y_train'], data['X_test'], data['y_test'], hp
+            model, data['X_train'], data['y_train'], data['X_test'], data['y_test'], hp, callbacks=extra_callbacks
         )
     elif use_batch_scheduling:
         print(f"\n📈 [Taktik 3] Batch Size Scheduling diaktifkan. Start Batch: {init_batch_size}")
@@ -196,11 +207,14 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
     end_time = time.time()
     training_duration = end_time - start_time
 
-    # Save model
-    if arch == 'patchtst_hf':
+    if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
         import torch
         model_path = os.path.join(model_folder, "model_hf")
-        model.save_pretrained(model_path)
+        if hasattr(model, 'save_pretrained'):
+            model.save_pretrained(model_path)
+        else:
+            # For CustomAutoformerForPrediction
+            torch.save(model.state_dict(), os.path.join(model_folder, "pytorch_model.bin"))
     else:
         model_path = os.path.join(model_folder, "model.keras")
         try:
@@ -342,7 +356,7 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
 
 
         # Architecture-Specific Hyperparameters
-        if arch in ['patchtst', 'patchtst_hf']:
+        if arch in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'autoformer']:
             if 'patch_len' in space:
                 hp['patch_len'] = trial.suggest_int('patch_len', space['patch_len'][0], space['patch_len'][1], step=space['patch_len'][2])
             else:
@@ -420,23 +434,6 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                 valid_heads = [h for h in [1, 2, 4, 8, 16, 32] if hp['d_model'] % h == 0]
                 hp['n_heads'] = max(valid_heads) if valid_heads else max(h for h in [1, 2, 4] if hp['d_model'] % h == 0)
 
-        elif arch == 'autoformer':
-            if 'd_model' in space:
-                hp['d_model'] = trial.suggest_categorical('d_model', [2**i for i in range(int(np.log2(space['d_model'][0])), int(np.log2(space['d_model'][1]))+1)])
-            if 'n_layers' in space:
-                hp['n_layers'] = trial.suggest_int('n_layers', space['n_layers'][0], space['n_layers'][1])
-            if 'ff_dim' in space:
-                hp['ff_dim'] = trial.suggest_categorical('ff_dim', [2**i for i in range(int(np.log2(space['ff_dim'][0])), int(np.log2(space['ff_dim'][1]))+1)])
-            if 'moving_avg' in space:
-                hp['moving_avg'] = trial.suggest_int('moving_avg', space['moving_avg'][0], space['moving_avg'][1], step=space['moving_avg'][2] if len(space['moving_avg']) > 2 else 2)
-            else:
-                hp['moving_avg'] = 25
-
-            # constraints
-            hp['moving_avg'] = min(hp['moving_avg'], hp['lookback'])
-            if hp['moving_avg'] % 2 == 0:
-                hp['moving_avg'] += 1 # Autoformer kernel must be odd
-
         else:
             # For non-PatchTST/TimeTracker/Autoformer models like GRU/LSTM/RNN, preserve specific params from cfg
             if 'use_bidirectional' in cfg['model']['hyperparameters']:
@@ -465,8 +462,8 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
         actual_lookback = X_tr.shape[1]
         
         # Build model and train based on Architecture Type
-        if arch == 'patchtst_hf':
-            from src.model_hf import build_patchtst_hf, train_eval_pytorch_model
+        if arch in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+            # PyTorch specific model building and training
             if hp['lookback'] != actual_lookback:
                 if hp['lookback'] < actual_lookback:
                     X_tr = X_tr[:, -hp['lookback']:, :]
@@ -475,7 +472,12 @@ def run_optuna_tuning(cfg: dict, data: dict = None, extra_callbacks: list = None
                     hp['lookback'] = actual_lookback
             
             # Using custom HF builder and PyTorch training loop
-            model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
+            if arch == 'patchtst_hf':
+                model = build_patchtst_hf(hp['lookback'], n_features, horizon, hp)
+            elif arch == 'autoformer_hf':
+                model = build_autoformer_hf(hp['lookback'], n_features, horizon, hp)
+            else:
+                model = build_causal_transformer_hf(hp['lookback'], n_features, horizon, hp)
             # Make sure we pass batch_size, epochs etc. to PyTorch trainer
             hp['batch_size'] = trial.suggest_categorical('batch_size', space.get('batch_size', [16, 32, 64, 128])) if 'batch_size' in space else cfg['training'].get('batch_size', 32)
             hp['epochs'] = 100 # Standard tuning limit
