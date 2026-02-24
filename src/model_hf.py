@@ -57,12 +57,15 @@ class CustomAutoformerForPrediction(nn.Module):
         past_observed_mask = torch.ones(batch_size, self.config.context_length, device=device)
         
         # pass through Autoformer
-        out = self.autoformer(
-            past_values=past_values,
-            past_time_features=past_time_features,
-            past_observed_mask=past_observed_mask,
-            future_time_features=future_time_features
-        )
+        # cuFFT requires power-of-two sizes for half precision. 
+        # We force float32 for the FFT part to support arbitrary lookback (like 72).
+        with torch.cuda.amp.autocast(enabled=False):
+            out = self.autoformer(
+                past_values=past_values.float(),
+                past_time_features=past_time_features.float(),
+                past_observed_mask=past_observed_mask.float(),
+                future_time_features=future_time_features.float()
+            )
         
         hidden = out.encoder_last_hidden_state  # [B, T, d_model]
         hidden = hidden.contiguous().view(batch_size, -1)  # [B, T * d_model]
@@ -100,6 +103,7 @@ def build_autoformer_hf(lookback, n_features, forecast_horizon, hp: dict):
         dropout=dropout,
         attention_dropout=dropout,
         activation_dropout=dropout,
+        moving_avg=hp.get('moving_avg', 25),
         lags_sequence=[0],
         label_length=0,
         scaling=False,

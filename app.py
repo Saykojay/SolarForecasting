@@ -1568,11 +1568,11 @@ with tab_train:
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 
                     'stride': 8, 'n_heads': 16
                 })
-            elif new_a in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']: # New HF Models
+            elif new_a in ['patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']: # New HF Models
                 cfg['model']['hyperparameters'].update({
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 
-                    'stride': 8, 'n_heads': 16
+                    'stride': 8, 'n_heads': 16, 'ff_dim': 256, 'moving_avg': 25
                 })
             elif new_a == 'timetracker':
                 cfg['model']['hyperparameters'].update({
@@ -1594,7 +1594,7 @@ with tab_train:
                 })
             
             # C-Delete keys that are no longer relevant to avoid config pollution
-            if new_a not in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'timetracker', 'timeperceiver']:
+            if new_a not in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'timetracker', 'timeperceiver', 'autoformer']:
                 for k in ['patch_len', 'stride', 'n_heads', 'ff_dim', 'n_shared_experts', 'n_private_experts', 'top_k', 'n_latent_tokens']:
                     cfg['model']['hyperparameters'].pop(k, None)
             elif new_a not in ['gru', 'lstm', 'rnn']:
@@ -1621,7 +1621,7 @@ with tab_train:
                                               value=hp.get('lookback', 72))
             
             # Adaptive Labels for Core Structure
-            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
+            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "autoformer"]:
                 d_label = "d_model (Embedding Dimension)"
                 l_label = "Transformer Blocks"
             elif new_arch == "timetracker":
@@ -1651,6 +1651,7 @@ with tab_train:
             hp['batch_size'] = st.selectbox("Batch Size", _bs_opts,
                                              index=_bs_opts.index(hp.get('batch_size', 32)))
             
+
             # --- NEW TACTIC 3 SCHEDULING ---
             cfg['training']['use_batch_scheduling'] = st.checkbox(
                 "📈 Batch Size Scheduling", 
@@ -1671,13 +1672,27 @@ with tab_train:
                                              min_value=0.0, max_value=0.9, step=0.01, format="%.2f")
             
             # --- ARCHITECTURE SPECIFIC PARAMS ---
-            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
-                with st.expander("🧩 PatchTST Specific Params", expanded=True):
-                    hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
-                    hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
-                    hp['ff_dim'] = st.number_input("ff_dim (F)", value=hp.get('ff_dim', hp['d_model'] * 2), min_value=32, step=32)
-                    _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 16)]))
-                    hp['n_heads'] = st.selectbox("n_heads (H)", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 16)))
+            if new_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "autoformer", "timetracker", "timeperceiver"]:
+                # Dynamic Labeling & Content
+                _is_patch = new_arch in ["patchtst", "patchtst_hf", "timetracker", "timeperceiver"]
+                _is_autoformer = new_arch in ["autoformer", "autoformer_hf"]
+                
+                exp_title = f"🧩 {new_arch.upper()} Configuration" if not _is_patch else "🧩 Patch-Based Specific Params"
+                
+                with st.expander(exp_title, expanded=True):
+                    # 1. Patching (Hanya untuk model yang mendukung Patching)
+                    if _is_patch:
+                        hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2, key=f"hp_pl_{new_arch}")
+                        hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1, key=f"hp_st_{new_arch}")
+                    
+                    # 2. Moving Average (Khusus Autoformer)
+                    if _is_autoformer:
+                        hp['moving_avg'] = st.number_input("Moving Average Kernel", value=hp.get('moving_avg', 25), min_value=1, step=2, help="Kernel size for trend-seasonal decomposition (Must be odd)", key=f"hp_ma_{new_arch}")
+
+                    # 3. Transformer/Attention Commons
+                    hp['ff_dim'] = st.number_input("ff_dim (Feed-Forward dimension)", value=hp.get('ff_dim', hp['d_model'] * 2), min_value=32, step=32, key=f"hp_ff_{new_arch}")
+                    _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16, 32] + [hp.get('n_heads', 16)]))
+                    hp['n_heads'] = st.selectbox("n_heads (Attention Heads)", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 16)), key=f"hp_nh_{new_arch}")
             
             elif new_arch == "timetracker":
                 with st.expander("⏱️ TimeTracker Specific Params", expanded=True):
@@ -1891,9 +1906,15 @@ with tab_batch:
             if 'batch_arch_selector' not in st.session_state:
                 st.session_state.batch_arch_selector = cfg['model'].get('architecture', 'patchtst').lower()
                 
+            # Callback to handle dropdown changes cleanly
+            def _update_batch_arch():
+                st.session_state.batch_arch_selector = st.session_state.temp_batch_arch_selector
+
             q_arch_val = st.selectbox(gt('architecture', st.session_state.lang), 
                                      arch_list, 
-                                     key="batch_arch_selector")
+                                     index=arch_list.index(st.session_state.batch_arch_selector) if st.session_state.batch_arch_selector in arch_list else 0,
+                                     key="temp_batch_arch_selector",
+                                     on_change=_update_batch_arch)
             
             q_name = st.text_input(gt('exp_name', st.session_state.lang), 
                                   value=f"Exp_{q_arch_val}_{len(st.session_state.batch_queue)+1}",
@@ -1909,7 +1930,7 @@ with tab_batch:
                     'lookback': 72, 'learning_rate': 0.0001, 'batch_size': 32, 'dropout': 0.2, 'd_model': 64, 'n_layers': 2
                 }
                 
-                if q_arch_val in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf']:
+                if q_arch_val in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']:
                     q_hp.update(base_defaults)
                     q_hp.update({'d_model': 128, 'n_layers': 3, 'patch_len': 16, 'stride': 8, 'n_heads': 16, 'ff_dim': 256})
                     d_label, l_label = "d_model (Embedding)", "Transformer Blocks"
@@ -1942,17 +1963,18 @@ with tab_batch:
                     q_hp['batch_size'] = st.selectbox("Batch Size", _bs_opts, index=_bs_opts.index(q_hp.get('batch_size', 32)) if q_hp.get('batch_size', 32) in _bs_opts else 1, key=f"q_bs_{q_arch_val}")
                     q_hp['dropout'] = st.number_input("Dropout", 0.0, 0.9, q_hp.get('dropout', 0.2), 0.05, key=f"q_dr_{q_arch_val}")
 
+
                 # --- SPECIFIC PARAMS ---
-                if q_arch_val in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
+                if q_arch_val in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "autoformer"]:
                     st.markdown("---")
                     sq1, sq2 = st.columns(2)
                     with sq1:
-                        q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key="q_pl")
-                        q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key="q_st")
+                        q_hp['patch_len'] = st.number_input("Patch Len", 4, 64, q_hp.get('patch_len', 16), 4, key=f"q_pl_{q_arch_val}")
+                        q_hp['stride'] = st.number_input("Stride", 2, 32, q_hp.get('stride', 8), 2, key=f"q_st_{q_arch_val}")
                     with sq2:
-                        q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp.get('d_model', 128)*2), 32, key="q_ff")
+                        q_hp['ff_dim'] = st.number_input("ff_dim", 32, 1024, q_hp.get('ff_dim', q_hp.get('d_model', 128)*2), 32, key=f"q_ff_{q_arch_val}")
                         _h_opts = [1, 2, 4, 8, 12, 16]
-                        q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key="q_nh")
+                        q_hp['n_heads'] = st.selectbox("n_heads", _h_opts, index=_h_opts.index(q_hp.get('n_heads', 16)) if q_hp.get('n_heads', 16) in _h_opts else 5, key=f"q_nh_{q_arch_val}")
                 
                 elif q_arch_val == "timetracker":
                     st.markdown("---")
@@ -2318,7 +2340,7 @@ with tab_tuning:
         def _update_tuning_architecture():
             new_a = st.session_state.tune_arch_selector
             cfg['model']['architecture'] = new_a
-            if new_a == 'patchtst':
+            if new_a in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']:
                 cfg['model']['hyperparameters'].update({
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
@@ -2328,7 +2350,7 @@ with tab_tuning:
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
                     'batch_size': 32, 'dropout': 0.2, 'use_bidirectional': True
                 })
-            if new_a != 'patchtst':
+            if new_a not in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']:
                 for k in ['patch_len', 'stride', 'n_heads', 'ff_dim']: cfg['model']['hyperparameters'].pop(k, None)
             else:
                 cfg['model']['hyperparameters'].pop('use_bidirectional', None)
@@ -2375,15 +2397,15 @@ with tab_tuning:
                 if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "autoformer"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
-                    p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key="p_min_new")
-                    p_max = st.number_input("Patch Max", p_min, 128, p_vals[1], 2, key="p_max_new")
-                    p_step = st.number_input("Patch Step", 1, 16, p_vals[2], 1, key="p_step_new")
+                    p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key=f"p_min_{t_arch}")
+                    p_max = st.number_input("Patch Max", p_min, 128, p_vals[1], 2, key=f"p_max_{t_arch}")
+                    p_step = st.number_input("Patch Step", 1, 16, p_vals[2], 1, key=f"p_step_{t_arch}")
                     space['patch_len'] = [p_min, p_max, p_step]
                     
                     s_vals = space.get('stride', [4, 12, 2])
-                    s_min = st.number_input("Stride Min", 1, 32, s_vals[0], 1, key="s_min_new")
-                    s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key="s_max_new")
-                    s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key="s_step_new")
+                    s_min = st.number_input("Stride Min", 1, 32, s_vals[0], 1, key=f"s_min_{t_arch}")
+                    s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key=f"s_max_{t_arch}")
+                    s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key=f"s_step_{t_arch}")
                     space['stride'] = [s_min, s_max, s_step]
                 else:
                     st.markdown(f"**1. {t_arch.upper()} Configuration**")
@@ -2397,52 +2419,52 @@ with tab_tuning:
                 
                 st.markdown(f"**2. {t_arch.upper()} Capacity**")
                 d_vals = space.get('d_model', [64, 256])
-                d_min = st.number_input(f"{ss_d_label} Min", 4, 512, d_vals[0], 4, key="d_min_new")
-                d_max = st.number_input(f"{ss_d_label} Max", d_min, 1024, d_vals[1], 4, key="d_max_new")
+                d_min = st.number_input(f"{ss_d_label} Min", 4, 512, d_vals[0], 4, key=f"d_min_{t_arch}")
+                d_max = st.number_input(f"{ss_d_label} Max", d_min, 1024, d_vals[1], 4, key=f"d_max_{t_arch}")
                 space['d_model'] = [d_min, d_max]
                 
                 l_vals = space.get('n_layers', [2, 5])
-                l_min = st.number_input(f"{ss_l_label} Min", 1, 12, l_vals[0], 1, key="l_min_new")
-                l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key="l_max_new")
+                l_min = st.number_input(f"{ss_l_label} Min", 1, 12, l_vals[0], 1, key=f"l_min_{t_arch}")
+                l_max = st.number_input(f"{ss_l_label} Max", l_min, 20, l_vals[1], 1, key=f"l_max_{t_arch}")
                 space['n_layers'] = [l_min, l_max]
                 
                 if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker"]:
                     if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf"]:
                         ff_vals = space.get('ff_dim', [128, 512])
-                        ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="ff_min_new")
-                        ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="ff_max_new")
+                        ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key=f"ff_min_{t_arch}")
+                        ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key=f"ff_max_{t_arch}")
                         space['ff_dim'] = [ff_min, ff_max]
                     
                     h_vals = space.get('n_heads', [4, 16])
-                    h_min = st.number_input("Heads Min", 1, 32, h_vals[0], 1, key="h_min_new")
-                    h_max = st.number_input("Heads Max", h_min, 64, h_vals[1], 1, key="h_max_new")
+                    h_min = st.number_input("Heads Min", 1, 32, h_vals[0], 1, key=f"h_min_{t_arch}")
+                    h_max = st.number_input("Heads Max", h_min, 64, h_vals[1], 1, key=f"h_max_{t_arch}")
                     space['n_heads'] = [h_min, h_max]
 
                 if t_arch == "timetracker":
                     se_vals = space.get('n_shared_experts', [1, 2])
-                    se_min = st.number_input("Shared Exp Min", 0, 8, se_vals[0], 1, key="se_min_new")
-                    se_max = st.number_input("Shared Exp Max", se_min, 8, se_vals[1], 1, key="se_max_new")
+                    se_min = st.number_input("Shared Exp Min", 0, 8, se_vals[0], 1, key=f"se_min_{t_arch}")
+                    se_max = st.number_input("Shared Exp Max", se_min, 8, se_vals[1], 1, key=f"se_max_{t_arch}")
                     space['n_shared_experts'] = [se_min, se_max]
 
                     pe_vals = space.get('n_private_experts', [2, 8])
-                    pe_min = st.number_input("Priv Exp Min", 1, 32, pe_vals[0], 1, key="pe_min_new")
-                    pe_max = st.number_input("Priv Exp Max", pe_min, 32, pe_vals[1], 1, key="pe_max_new")
+                    pe_min = st.number_input("Priv Exp Min", 1, 32, pe_vals[0], 1, key=f"pe_min_{t_arch}")
+                    pe_max = st.number_input("Priv Exp Max", pe_min, 32, pe_vals[1], 1, key=f"pe_max_{t_arch}")
                     space['n_private_experts'] = [pe_min, pe_max]
 
                     tk_vals = space.get('top_k', [1, 2])
-                    tk_min = st.number_input("Top-K Min", 1, 8, tk_vals[0], 1, key="tk_min_new")
-                    tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key="tk_max_new")
+                    tk_min = st.number_input("Top-K Min", 1, 8, tk_vals[0], 1, key=f"tk_min_{t_arch}")
+                    tk_max = st.number_input("Top-K Max", tk_min, 8, tk_vals[1], 1, key=f"tk_max_{t_arch}")
                     space['top_k'] = [tk_min, tk_max]
 
                 if t_arch in ["autoformer", "autoformer_hf"]:
                     ff_vals = space.get('ff_dim', [128, 512])
-                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key="af_ff_min")
-                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key="af_ff_max")
+                    ff_min = st.number_input("FF_Dim Min", 4, 1024, ff_vals[0], 4, key=f"af_ff_min_{t_arch}")
+                    ff_max = st.number_input("FF_Dim Max", ff_min, 2048, ff_vals[1], 4, key=f"af_ff_max_{t_arch}")
                     space['ff_dim'] = [ff_min, ff_max]
                     
                     ma_vals = space.get('moving_avg', [25, 25])
-                    ma_min = st.number_input("Moving Avg Min", 1, 65, ma_vals[0], 2, key="ma_min_new")
-                    ma_max = st.number_input("Moving Avg Max", ma_min, 65, ma_vals[1], 2, key="ma_max_new")
+                    ma_min = st.number_input("Moving Avg Min", 1, 65, ma_vals[0], 2, key=f"ma_min_{t_arch}")
+                    ma_max = st.number_input("Moving Avg Max", ma_min, 65, ma_vals[1], 2, key=f"ma_max_{t_arch}")
                     space['moving_avg'] = [ma_min, ma_max]
 
                 dr_vals = space.get('dropout', [0.05, 0.3])
