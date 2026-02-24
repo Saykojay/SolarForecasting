@@ -2350,13 +2350,20 @@ with tab_tuning:
         def _update_tuning_architecture():
             new_a = st.session_state.tune_arch_selector
             cfg['model']['architecture'] = new_a
-            if new_a in ['patchtst', 'patchtst_hf', 'causal_transformer_hf']:
-                # PatchTST & Causal Transformer: use patch_len + stride
+            if new_a in ['patchtst', 'patchtst_hf', 'timetracker']:
+                # Architectures that DO use patching
                 cfg['model']['hyperparameters'].update({
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
                 })
                 for k in ['moving_avg', 'use_bidirectional']: cfg['model']['hyperparameters'].pop(k, None)
+            elif new_a in ['causal_transformer_hf']:
+                # Decoder-only: NO patching, NO moving avg
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
+                    'batch_size': 32, 'dropout': 0.2, 'n_heads': 16
+                })
+                for k in ['moving_avg', 'use_bidirectional', 'patch_len', 'stride']: cfg['model']['hyperparameters'].pop(k, None)
             elif new_a in ['autoformer_hf', 'autoformer']:
                 # Autoformer: uses moving_avg, NO patch_len/stride
                 cfg['model']['hyperparameters'].update({
@@ -2411,7 +2418,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "patchtst_hf", "causal_transformer_hf", "timetracker"]:
+                if t_arch in ["patchtst", "patchtst_hf", "timetracker"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key=f"p_min_{t_arch}")
@@ -2433,6 +2440,11 @@ with tab_tuning:
                     m_min = st.number_input("Moving Avg Min (Odd)", 3, 99, m_min_val, 2, key=f"m_min_{t_arch}")
                     m_max = st.number_input("Moving Avg Max (Odd)", m_min, 99, m_max_val, 2, key=f"m_max_{t_arch}")
                     space['moving_avg'] = [m_min, m_max]
+                elif t_arch == "causal_transformer_hf":
+                    st.markdown("**1. Causal Decoder**")
+                    st.info("Arsitektur murni Decoder-Only. Tidak menggunakan Patching maupun Decomposition.")
+                    for k in ['patch_len', 'stride', 'moving_avg', 'top_k', 'n_shared_experts', 'n_private_experts', 'use_bidirectional']:
+                        space.pop(k, None)
                 else:
                     st.markdown(f"**1. {t_arch.upper()} Configuration**")
                     st.info("Parameter patching tidak tersedia untuk arsitektur ini.")
