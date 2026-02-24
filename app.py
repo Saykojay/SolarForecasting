@@ -2350,20 +2350,27 @@ with tab_tuning:
         def _update_tuning_architecture():
             new_a = st.session_state.tune_arch_selector
             cfg['model']['architecture'] = new_a
-            if new_a in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']:
+            if new_a in ['patchtst', 'patchtst_hf', 'causal_transformer_hf']:
+                # PatchTST & Causal Transformer: use patch_len + stride
                 cfg['model']['hyperparameters'].update({
                     'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
                     'batch_size': 32, 'dropout': 0.2, 'patch_len': 16, 'stride': 8, 'n_heads': 16
                 })
+                for k in ['moving_avg', 'use_bidirectional']: cfg['model']['hyperparameters'].pop(k, None)
+            elif new_a in ['autoformer_hf', 'autoformer']:
+                # Autoformer: uses moving_avg, NO patch_len/stride
+                cfg['model']['hyperparameters'].update({
+                    'd_model': 128, 'n_layers': 3, 'learning_rate': 0.0001, 
+                    'batch_size': 32, 'dropout': 0.2, 'n_heads': 16, 'moving_avg': 25
+                })
+                for k in ['patch_len', 'stride', 'use_bidirectional']: cfg['model']['hyperparameters'].pop(k, None)
             else:
+                # RNN/GRU/LSTM: no transformer params
                 cfg['model']['hyperparameters'].update({
                     'd_model': 64, 'n_layers': 2, 'learning_rate': 0.001, 
                     'batch_size': 32, 'dropout': 0.2, 'use_bidirectional': True
                 })
-            if new_a not in ['patchtst', 'patchtst_hf', 'autoformer_hf', 'causal_transformer_hf', 'autoformer']:
-                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim']: cfg['model']['hyperparameters'].pop(k, None)
-            else:
-                cfg['model']['hyperparameters'].pop('use_bidirectional', None)
+                for k in ['patch_len', 'stride', 'n_heads', 'ff_dim', 'moving_avg']: cfg['model']['hyperparameters'].pop(k, None)
             save_config_to_file(cfg)
             st.session_state.cfg = cfg
             st.session_state.arch_selector_train = new_a
@@ -2404,7 +2411,7 @@ with tab_tuning:
             col_s1, col_s2, col_s3 = st.columns(3)
             
             with col_s1:
-                if t_arch in ["patchtst", "patchtst_hf", "autoformer_hf", "causal_transformer_hf", "timetracker", "autoformer"]:
+                if t_arch in ["patchtst", "patchtst_hf", "causal_transformer_hf", "timetracker"]:
                     st.markdown("**1. Patching & Stride**")
                     p_vals = space.get('patch_len', [8, 24, 4])
                     p_min = st.number_input("Patch Min", 2, 64, p_vals[0], 2, key=f"p_min_{t_arch}")
@@ -2417,6 +2424,15 @@ with tab_tuning:
                     s_max = st.number_input("Stride Max", s_min, 64, s_vals[1], 1, key=f"s_max_{t_arch}")
                     s_step = st.number_input("Stride Step", 1, 8, s_vals[2], 1, key=f"s_step_{t_arch}")
                     space['stride'] = [s_min, s_max, s_step]
+                elif t_arch in ["autoformer", "autoformer_hf"]:
+                    st.markdown("**1. Moving Avg (Decomposition)**")
+                    st.info("Parameter wajib bernilai ganjil.")
+                    m_vals = space.get('moving_avg', [25, 49])
+                    m_min_val = m_vals[0] if len(m_vals) > 0 else 25
+                    m_max_val = m_vals[1] if len(m_vals) > 1 else 49
+                    m_min = st.number_input("Moving Avg Min (Odd)", 3, 99, m_min_val, 2, key=f"m_min_{t_arch}")
+                    m_max = st.number_input("Moving Avg Max (Odd)", m_min, 99, m_max_val, 2, key=f"m_max_{t_arch}")
+                    space['moving_avg'] = [m_min, m_max]
                 else:
                     st.markdown(f"**1. {t_arch.upper()} Configuration**")
                     st.info("Parameter patching tidak tersedia untuk arsitektur ini.")
