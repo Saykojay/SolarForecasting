@@ -46,7 +46,7 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
             'lookback': [24, 168, 24],
             'use_bidirectional': [True] # <-- Fixed to True only
         }
-    elif arch_name in ['patchtst', 'patchtst_hf', 'autoformer_hf']:
+    elif arch_name in ['patchtst', 'patchtst_hf']:
         cfg['tuning']['search_space'] = {
             'patch_len': [8, 32, 8],
             'stride': [4, 16, 4],
@@ -58,6 +58,18 @@ def run_cli_tuning(arch_name, n_trials=50, use_subsample=False, subsample_ratio=
             'learning_rate': [5e-5, 1e-3],
             'batch_size': [128, 128], # Dikunci demi stabilitas paralel
             'lookback': [168, 336, 24]
+        }
+    elif arch_name in ['autoformer_hf', 'autoformer']:
+        cfg['tuning']['search_space'] = {
+            'moving_avg': [25, 49], # Window trend dekonsruksi (harus ganjil/odd array)
+            'd_model': [64, 128],
+            'n_layers': [2, 4],
+            'n_heads': [8, 16],
+            'ff_dim': [256, 512],
+            'dropout': [0.1, 0.4],
+            'learning_rate': [5e-5, 1e-3],
+            'batch_size': [128, 128], # Dikunci demi konsistensi Transformer VRAM
+            'lookback': [96, 336, 24] # Minimal 4 hari (96 jam) agar pola musim terlihat
         }
     else:
         print(f"⚠️ Search space default digunakan untuk {arch_name}.")
