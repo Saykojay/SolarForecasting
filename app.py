@@ -562,7 +562,7 @@ with st.sidebar:
 # Status Cards & Definitions
 new_arch = cfg['model'].get('architecture', 'patchtst')
 has_data = os.path.exists(os.path.join(proc_dir, 'X_train.npy'))
-has_model = any(f.endswith(('.keras', '.h5')) for f in os.listdir(model_dir)) if os.path.exists(model_dir) else False
+has_model = any(f.endswith(('.keras', '.h5', '.json')) for f in os.listdir(model_dir)) or any(os.path.isdir(os.path.join(model_dir, f)) for f in os.listdir(model_dir) if not f.startswith('.')) if os.path.exists(model_dir) else False
 has_target = any(f.endswith('.csv') for f in os.listdir(target_dir)) if os.path.exists(target_dir) else False
 
 st.markdown(f"""
