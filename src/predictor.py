@@ -483,7 +483,10 @@ def test_on_target(model_path: str, target_csv: str, cfg: dict):
     y_scaler = joblib.load(os.path.join(proc, 'y_scaler.pkl'))
 
     # 3. Load & preprocess target data
-    df_target = pd.read_csv(target_csv, sep=cfg['data']['csv_separator'])
+    if target_csv.endswith(('.xlsx', '.xls')):
+        df_target = pd.read_excel(target_csv)
+    else:
+        df_target = pd.read_csv(target_csv, sep=cfg['data']['csv_separator'])
     df_target[cfg['data']['time_col']] = pd.to_datetime(
         df_target[cfg['data']['time_col']], format=cfg['data'].get('time_format'))
     df_target_clean = preprocess_algorithm1(df_target, cfg)

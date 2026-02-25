@@ -3271,58 +3271,57 @@ with tab_transfer:
     st.markdown("Uji model terlatih pada data dari lokasi berbeda (misal: Indonesia).")
     
     os.makedirs(target_dir, exist_ok=True)
-    target_files = [f for f in os.listdir(target_dir) if f.endswith('.csv')]
+    os.makedirs(target_dir, exist_ok=True)
     
     if not has_model:
         st.warning("Belum ada model terlatih. Jalankan Training terlebih dahulu.")
-    elif not target_files:
-        st.warning(f"Belum ada file CSV di `{os.path.abspath(target_dir)}/`")
-        st.markdown("""
-        **Langkah:**
-        1. Letakkan file CSV data target di folder `data/target/`
-        2. Pastikan format kolom sama dengan data training
-        3. Kembali ke tab ini dan pilih file
-        """)
+    else:
+        model_list = [f for f in os.listdir(model_dir) if f.endswith(('.keras', '.h5', '.json')) or (os.path.isdir(os.path.join(model_dir, f)) and not f.startswith('.'))]
+        selected_model = st.selectbox("1. Pilih Model untuk Diuji:", model_list, format_func=lambda x: label_format_with_time(x, model_dir), key="target_model_sel")
         
-        # File uploader as alternative
-        uploaded = st.file_uploader("Atau upload CSV langsung:", type=['csv'])
+        st.markdown("---")
+        st.markdown("#### 2. Pilih / Upload Data Target")
+        uploaded = st.file_uploader("Upload Data Target Baru (CSV / Excel):", type=['csv', 'xlsx', 'xls'], key="target_uploader")
         if uploaded:
             save_path = os.path.join(target_dir, uploaded.name)
             with open(save_path, 'wb') as f:
                 f.write(uploaded.getvalue())
-            st.success(f"File disimpan ke {save_path}")
+            st.success(f"File berhasil diupload ke {save_path}")
             st.rerun()
-    else:
-        selected_target = st.selectbox("Pilih file data target:", target_files)
+            
+        target_files = [f for f in os.listdir(target_dir) if f.endswith(('.csv', '.xlsx', '.xls'))]
         
-        if st.button("▶️ Run Target Testing", type="primary"):
-            with st.spinner("Menjalankan Target Testing..."):
-                try:
-                    import io, contextlib
-                    stdout_capture = io.StringIO()
-                    
-                    # Pick latest model
-                    model_files = sorted([f for f in os.listdir(model_dir) if f.endswith(('.keras', '.h5'))])
-                    model_path = os.path.join(model_dir, model_files[-1])
-                    target_csv = os.path.join(target_dir, selected_target)
-                    
-                    with contextlib.redirect_stdout(stdout_capture):
-                        from src.predictor import test_on_target
-                        metrics = test_on_target(model_path, target_csv, cfg)
-                    
-                    st.success("Target Testing selesai!")
-                    col1, col2, col3, col4 = st.columns(4)
-                    for col, (name, key) in zip(
-                        [col1, col2, col3, col4],
-                        [("MAE", "mae"), ("RMSE", "rmse"), ("R²", "r2"), ("MAPE", "mape")]
-                    ):
-                        with col:
-                            st.metric(name, f"{metrics[key]:.4f}")
-                    
-                    with st.expander("📜 Output Detail"):
-                        st.code(stdout_capture.getvalue(), language="text")
-                except Exception as e:
-                    st.error(f"Error: {e}")
+        if not target_files:
+            st.info("Belum ada data target di folder. Silakan upload terlebih dahulu.")
+        else:
+            selected_target = st.selectbox("Pilih file data target yang akan diuji:", target_files, key="target_file_sel")
+            
+            if st.button("▶️ Run Target Testing", type="primary", key="run_target_test_btn"):
+                with st.spinner("Menjalankan Target Testing..."):
+                    try:
+                        import io, contextlib
+                        stdout_capture = io.StringIO()
+                        
+                        model_path = os.path.join(model_dir, selected_model)
+                        target_data_path = os.path.join(target_dir, selected_target)
+                        
+                        with contextlib.redirect_stdout(stdout_capture):
+                            from src.predictor import test_on_target
+                            metrics = test_on_target(model_path, target_data_path, cfg)
+                        
+                        st.success("Target Testing selesai!")
+                        col1, col2, col3, col4 = st.columns(4)
+                        for col, (name, key) in zip(
+                            [col1, col2, col3, col4],
+                            [("MAE", "mae"), ("RMSE", "rmse"), ("R²", "r2"), ("MAPE", "mape")]
+                        ):
+                            with col:
+                                st.metric(name, f"{metrics[key]:.4f}")
+                        
+                        with st.expander("📜 Output Detail"):
+                            st.code(stdout_capture.getvalue(), language="text")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
 
 
