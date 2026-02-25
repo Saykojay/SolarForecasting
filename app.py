@@ -3284,10 +3284,17 @@ with tab_transfer:
         uploaded = st.file_uploader("Upload Data Target Baru (CSV / Excel):", type=['csv', 'xlsx', 'xls'], key="target_uploader")
         if uploaded:
             save_path = os.path.join(target_dir, uploaded.name)
-            with open(save_path, 'wb') as f:
-                f.write(uploaded.getvalue())
-            st.success(f"File berhasil diupload ke {save_path}")
-            st.rerun()
+            # Tulis file jika belum ada atau ukurannya beda agar tidak tulis ulang terus menerus
+            file_data = uploaded.getvalue()
+            needs_write = True
+            if os.path.exists(save_path):
+                if os.path.getsize(save_path) == len(file_data):
+                    needs_write = False
+            
+            if needs_write:
+                with open(save_path, 'wb') as f:
+                    f.write(file_data)
+                st.success(f"File berhasil diupload ke {save_path}")
             
         target_files = [f for f in os.listdir(target_dir) if f.endswith(('.csv', '.xlsx', '.xls'))]
         
