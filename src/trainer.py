@@ -633,3 +633,118 @@ def run_tscv(cfg: dict, data: dict = None):
     print("=" * 70)
 
     return metrics_per_fold
+
+
+def fine_tune_model(cfg, source_model_path, data=None):
+    """
+    Fine-tune an existing model on new data.
+    """
+    from src.model_factory import get_custom_objects, fix_lambda_tf_refs, compile_model
+    import sys
+
+    # 1. Load Pre-trained Model
+    print(f"\n🚀 FINE-TUNING MODE")
+    print(f"   Source Model: {source_model_path}")
+    
+    # Absolute path check — prefer .h5 first (more compatible with this project)
+    model_file = source_model_path
+    if os.path.isdir(source_model_path):
+        for ext in ['.h5', '.keras']:
+            candidate = os.path.join(source_model_path, f'model{ext}')
+            if os.path.exists(candidate):
+                model_file = candidate
+                break
+    
+    print(f"   Loading model from: {model_file}")
+    
+    # Try loading with fallback
+    try:
+        model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), safe_mode=False)
+    except Exception as e1:
+        print(f"   [WARN] Failed to load {model_file}: {e1}")
+        # Fallback: try the other format
+        alt_file = model_file.replace('.keras', '.h5') if model_file.endswith('.keras') else model_file.replace('.h5', '.keras')
+        if os.path.exists(alt_file):
+            print(f"   Trying alternative: {alt_file}")
+            model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
+        else:
+            # Last resort: try compile=False
+            model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
+    
+    fix_lambda_tf_refs(model)
+    
+    # 2. Prepare Data
+    if data is None:
+        proc = cfg['paths']['processed_dir']
+        data = {
+            'X_train': np.load(os.path.join(proc, 'X_train.npy')),
+            'y_train': np.load(os.path.join(proc, 'y_train.npy')),
+            'X_test': np.load(os.path.join(proc, 'X_test.npy')),
+            'y_test': np.load(os.path.join(proc, 'y_test.npy')),
+        }
+
+    # Align lookback
+    model_lookback = model.input_shape[1]
+    data_lookback = data['X_train'].shape[1]
+    
+    if data_lookback > model_lookback:
+        print(f"   Truncating data lookback: {data_lookback} -> {model_lookback}")
+        data['X_train'] = data['X_train'][:, -model_lookback:, :]
+        data['X_test'] = data['X_test'][:, -model_lookback:, :]
+    elif data_lookback < model_lookback:
+        raise ValueError(f"Data Target memiliki lookback ({data_lookback}) lebih kecil dari Model ({model_lookback}). Silakan preprocess data target dengan lookback {model_lookback}.")
+    
+    print(f"   Train Shape: {data['X_train'].shape}, Test/Val Shape: {data['X_test'].shape}")
+    
+    # 3. Re-compile with Lower Learning Rate
+    orig_lr = cfg['model']['hyperparameters'].get('learning_rate', 0.001)
+    ft_lr = orig_lr * 0.1 # Default 10% of original LR
+    print(f"   Fine-tuning LR: {ft_lr:.6f} (Original was {orig_lr:.6f})")
+    
+    compile_model(model, ft_lr, loss_fn=cfg['training'].get('loss_fn', 'huber'))
+    
+    # 4. Train
+    callbacks = _get_callbacks(cfg)
+    
+    # Training
+    t_cfg = cfg['training']
+    history = model.fit(
+        data['X_train'], data['y_train'],
+        validation_data=(data['X_test'], data['y_test']),
+        epochs=max(5, t_cfg.get('epochs', 20) // 2), 
+        batch_size=cfg['model']['hyperparameters'].get('batch_size', 32),
+        callbacks=callbacks,
+        shuffle=True, # Critical for stability
+        verbose=1
+    )
+    
+    # 5. Save as New Version
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    model_id = f"ft_{timestamp}_{cfg['model']['architecture']}"
+    save_dir = os.path.join(cfg['paths']['models_dir'], model_id)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    model_path = os.path.join(save_dir, "model.keras")
+    model.save(model_path)
+    
+    # Save meta
+    meta = {
+        'model_id': model_id,
+        'base_model': source_model_path,
+        'architecture': cfg['model']['architecture'],
+        'fine_tuned': True,
+        'timestamp': timestamp,
+        'history': history.history
+    }
+    with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+        json.dump(meta, f, indent=2)
+        
+    # Copy scalers from current processed dir
+    import shutil
+    for f in ['X_scaler.pkl', 'y_scaler.pkl', 'prep_summary.json']:
+        src_f = os.path.join(cfg['paths']['processed_dir'], f)
+        if os.path.exists(src_f):
+            shutil.copy(src_f, os.path.join(save_dir, f))
+            
+    print(f"\n✅ Fine-tuning Berhasil! Model disimpan di: {save_dir}")
+    return model, history, model_id

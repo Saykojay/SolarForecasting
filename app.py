@@ -835,6 +835,11 @@ with tab_prep_features:
                                            min_value=1, max_value=168, step=1, key="p_hor")
                 cfg['forecasting']['horizon'] = horizon_p
                 
+                lookback_p = st.number_input("Lookback (jam)", value=cfg['model']['hyperparameters']['lookback'],
+                                             min_value=6, max_value=720, step=6, key="p_lookback",
+                                             help="Jumlah jam sebelumnya yang digunakan model sebagai input. Lebih besar = lebih banyak konteks historis.")
+                cfg['model']['hyperparameters']['lookback'] = lookback_p
+                
                 scaler_options = ["minmax", "standard"]
                 current_scaler = cfg['features'].get('scaler_type', 'minmax').lower()
                 selected_scaler = st.selectbox("Metode Scaling (Prep)", scaler_options,
@@ -1079,9 +1084,17 @@ with tab_eval:
                             from src.model_hf import load_hf_wrapper
                             model = load_hf_wrapper(model_path)
                         else:
-                            model = tf.keras.models.load_model(model_path, compile=False)
+                            import zipfile
+                            if model_path.endswith('.keras') and not zipfile.is_zipfile(model_path):
+                                h5_path = model_path.replace('.keras', '.h5')
+                                if not os.path.exists(h5_path):
+                                    import shutil
+                                    shutil.copy(model_path, h5_path)
+                                model_path = h5_path
+                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
                             # Re-compile manually with standard Adam
-                            from src.model_factory import compile_model
+                            from src.model_factory import compile_model, fix_lambda_tf_refs
+                            fix_lambda_tf_refs(model)
                             compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                     
                     # Use model root for scalers
@@ -2832,7 +2845,16 @@ with tab_eval:
                                     from src.model_hf import load_hf_wrapper
                                     model = load_hf_wrapper(model_path)
                                 else:
-                                    model = tf.keras.models.load_model(model_path, compile=False)
+                                    import zipfile
+                                    if model_path.endswith('.keras') and not zipfile.is_zipfile(model_path):
+                                        h5_path = model_path.replace('.keras', '.h5')
+                                        if not os.path.exists(h5_path):
+                                            import shutil
+                                            shutil.copy(model_path, h5_path)
+                                        model_path = h5_path
+                                    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                    from src.model_factory import fix_lambda_tf_refs
+                                    fix_lambda_tf_refs(model)
                                     compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                             
                             scaler_dir = model_root if os.path.isdir(model_root) else None
@@ -3280,55 +3302,98 @@ with tab_transfer:
         selected_model = st.selectbox("1. Pilih Model untuk Diuji:", model_list, format_func=lambda x: label_format_with_time(x, model_dir), key="target_model_sel")
         
         st.markdown("---")
-        st.markdown("#### 2. Pilih / Upload Data Target")
-        uploaded = st.file_uploader("Upload Data Target Baru (CSV / Excel):", type=['csv', 'xlsx', 'xls'], key="target_uploader")
-        if uploaded:
-            save_path = os.path.join(target_dir, uploaded.name)
-            # Tulis file jika belum ada atau ukurannya beda agar tidak tulis ulang terus menerus
-            file_data = uploaded.getvalue()
-            needs_write = True
-            if os.path.exists(save_path):
-                if os.path.getsize(save_path) == len(file_data):
-                    needs_write = False
-            
-            if needs_write:
-                with open(save_path, 'wb') as f:
-                    f.write(file_data)
-                st.success(f"File berhasil diupload ke {save_path}")
-            
-        target_files = [f for f in os.listdir(target_dir) if f.endswith(('.csv', '.xlsx', '.xls'))]
+        st.markdown("---")
+        st.markdown("#### 2. Pilih Data Target (Preprocessed)")
+        st.info("💡 Pilih folder dari hasil **1. Preprocessing** (seperti `v10_...`) yang berisi data dari lokasi target.")
         
-        if not target_files:
-            st.info("Belum ada data target di folder. Silakan upload terlebih dahulu.")
+        processed_base_dir = cfg['paths']['processed_dir']
+        # Dapatkan parent directory yang berisi folder-folder preprocessed ("data/processed")
+        processed_root = os.path.dirname(processed_base_dir) if os.path.basename(processed_base_dir).startswith(('v', 'version')) else processed_base_dir
+        
+        if not os.path.exists(processed_root):
+            st.warning("Belum ada data preprocessed yang tersedia.")
         else:
-            selected_target = st.selectbox("Pilih file data target yang akan diuji:", target_files, key="target_file_sel")
+            processed_folders = [f for f in os.listdir(processed_root) if os.path.isdir(os.path.join(processed_root, f)) and not f.startswith('.')]
             
-            if st.button("▶️ Run Target Testing", type="primary", key="run_target_test_btn"):
-                with st.spinner("Menjalankan Target Testing..."):
-                    try:
-                        import io, contextlib
-                        stdout_capture = io.StringIO()
-                        
-                        model_path = os.path.join(model_dir, selected_model)
-                        target_data_path = os.path.join(target_dir, selected_target)
-                        
-                        with contextlib.redirect_stdout(stdout_capture):
-                            from src.predictor import test_on_target
-                            metrics = test_on_target(model_path, target_data_path, cfg)
-                        
-                        st.success("Target Testing selesai!")
-                        col1, col2, col3, col4 = st.columns(4)
-                        for col, (name, key) in zip(
-                            [col1, col2, col3, col4],
-                            [("MAE", "mae"), ("RMSE", "rmse"), ("R²", "r2"), ("MAPE", "mape")]
-                        ):
-                            with col:
-                                st.metric(name, f"{metrics[key]:.4f}")
-                        
-                        with st.expander("📜 Output Detail"):
-                            st.code(stdout_capture.getvalue(), language="text")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+            if not processed_folders:
+                st.info("Belum ada folder preprocessed. Silakan ke tab **Data Prep** terlebih dahulu.")
+            else:
+                selected_target = st.selectbox("Pilih Folder Data Processed:", sorted(processed_folders, reverse=True), key="target_folder_sel")
+                
+                # Container for results
+                if 'target_eval' not in st.session_state:
+                    st.session_state.target_eval = None
+
+                if st.button("▶️ Run Target Testing", type="primary", use_container_width=True, key="run_target_test_btn"):
+                    with st.spinner("Menjalankan inference pada data target..."):
+                        try:
+                            import io, contextlib
+                            from datetime import datetime
+                            stdout_capture = io.StringIO()
+                            
+                            model_path = os.path.join(model_dir, selected_model)
+                            target_data_path = os.path.join(processed_root, selected_target)
+                            
+                            with contextlib.redirect_stdout(stdout_capture):
+                                from src.predictor import test_on_preprocessed_target
+                                metrics = test_on_preprocessed_target(model_path, target_data_path, cfg)
+                            
+                            # Save to session state to persist across reruns (like clicking Fine-tune)
+                            st.session_state.target_eval = {
+                                'metrics': metrics,
+                                'output': stdout_capture.getvalue(),
+                                'target_folder': selected_target,
+                                'model_id': selected_model,
+                                'timestamp': datetime.now().strftime("%H:%M:%S")
+                            }
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Inference Error: {e}")
+                            print(f"ERROR during target testing: {e}")
+
+                # ALWAYS RENDER RESULTS IF THEY EXIST IN SESSION STATE
+                if st.session_state.target_eval:
+                    eval_data = st.session_state.target_eval
+                    
+                    st.success(f"Hasil Evaluasi: **{eval_data['model_id']}** pada data **{eval_data['target_folder']}**")
+                    
+                    m = eval_data['metrics']
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("MAE", f"{m['mae']:.4f}")
+                    col2.metric("RMSE", f"{m['rmse']:.4f}")
+                    col3.metric("R²", f"{m['r2']:.4f}")
+                    col4.metric("MAPE", f"{m['mape']:.4f}%")
+                    
+                    with st.expander("📜 Output Detail"):
+                        st.code(eval_data['output'], language="text")
+
+                    # --- FINE-TUNING SECTION ---
+                    st.markdown("---")
+                    st.markdown("#### ⚡ Fine-Tuning (Transfer Learning)")
+                    st.markdown(f"""
+                    Jika hasil di atas belum memuaskan, Anda bisa melatih model `{eval_data['model_id']}` 
+                    khusus di data `{eval_data['target_folder']}`.
+                    """)
+                    
+                    if st.button("🔥 Start Fine-Tuning on Target Data", 
+                                type="secondary", use_container_width=True, key="run_fine_tune_btn"):
+                        with st.spinner("🚀 Melakukan Fine-tuning..."):
+                            try:
+                                from src.trainer import fine_tune_model
+                                from datetime import datetime
+                                model_path = os.path.join(model_dir, eval_data['model_id'])
+                                
+                                cfg_target = cfg.copy()
+                                cfg_target['paths']['processed_dir'] = os.path.join(processed_root, eval_data['target_folder'])
+                                
+                                ft_model, ft_history, ft_id = fine_tune_model(cfg_target, model_path)
+                                
+                                st.success(f"✅ Fine-tuning Berhasil! Model baru: **{ft_id}**")
+                                st.session_state.pipeline_log.append(f"[{datetime.now():%H:%M:%S}] Fine-tuned {eval_data['model_id']} -> {ft_id}")
+                                st.info("💡 Pilih model baru ini di dropdown atas untuk menguji peningkatannya!")
+                                st.balloons()
+                            except Exception as e:
+                                st.error(f"Fine-tuning Error: {e}")
 
 
 
@@ -3407,7 +3472,16 @@ with tab_compare:
                                             from src.model_hf import load_hf_wrapper
                                             model = load_hf_wrapper(model_path)
                                         else:
-                                            model = tf.keras.models.load_model(model_path, compile=False)
+                                            import zipfile
+                                            if model_path.endswith('.keras') and not zipfile.is_zipfile(model_path):
+                                                h5_path = model_path.replace('.keras', '.h5')
+                                                if not os.path.exists(h5_path):
+                                                    import shutil
+                                                    shutil.copy(model_path, h5_path)
+                                                model_path = h5_path
+                                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                            from src.model_factory import fix_lambda_tf_refs
+                                            fix_lambda_tf_refs(model)
                                             compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
                                     
                                 # 4. Run Evaluation
@@ -3483,7 +3557,8 @@ with tab_compare:
                                 
                                 comparison_results.append({
                                     'Model ID': model_id,
-                                    'R²': m_test['r2'],
+                                    'R² Test': m_test['r2'],
+                                    'R² Train': m_train['r2'],
                                     'MAE': m_test['mae'],
                                     'nMAE (%)': m_test.get('norm_mae', 0) * 100,
                                     'RMSE': m_test['rmse'],
@@ -3502,7 +3577,7 @@ with tab_compare:
                                 print(f"      ERROR: {err_info}")
                                 comparison_results.append({
                                     'Model ID': model_id,
-                                    'R²': 0, 'MAE': 999, 'nMAE (%)': 999, 
+                                    'R² Test': 0, 'R² Train': 0, 'MAE': 999, 'nMAE (%)': 999, 
                                     'RMSE': 999, 'nRMSE (%)': 999, 'Train Time (s)': 0,
                                     'Features N': 'Error', 'Feature List': 'Error',
                                     'Lookback': 'Error', 'Verified On': 'Error'
@@ -3534,10 +3609,27 @@ with tab_compare:
                     is_min = s == s.min()
                     return ['background-color: rgba(16, 185, 129, 0.2)' if v else '' for v in is_min]
 
-                styled_df = df_comp.style.format({
-                    'R²': '{:.4f}', 'MAE': '{:.4f}', 'nMAE (%)': '{:.2f}',
-                    'RMSE': '{:.4f}', 'nRMSE (%)': '{:.2f}', 'Train Time (s)': '{:.1f}'
-                }).apply(highlight_max, subset=['R²']).apply(highlight_min, subset=['MAE', 'nMAE (%)', 'RMSE', 'nRMSE (%)'])
+                # Build format dict and highlight subsets dynamically
+                fmt = {}
+                r2_cols = []
+                for col in ['R² Test', 'R² Train', 'R²']:
+                    if col in df_comp.columns:
+                        fmt[col] = '{:.4f}'
+                        r2_cols.append(col)
+                for col in ['MAE', 'RMSE']:
+                    if col in df_comp.columns: fmt[col] = '{:.4f}'
+                for col in ['nMAE (%)', 'nRMSE (%)']:
+                    if col in df_comp.columns: fmt[col] = '{:.2f}'
+                if 'Train Time (s)' in df_comp.columns:
+                    fmt['Train Time (s)'] = '{:.1f}'
+                
+                err_cols = [c for c in ['MAE', 'nMAE (%)', 'RMSE', 'nRMSE (%)'] if c in df_comp.columns]
+                
+                styled_df = df_comp.style.format(fmt)
+                if r2_cols:
+                    styled_df = styled_df.apply(highlight_max, subset=r2_cols)
+                if err_cols:
+                    styled_df = styled_df.apply(highlight_min, subset=err_cols)
                 
                 st.dataframe(styled_df, width="stretch")
                 

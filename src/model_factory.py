@@ -884,6 +884,29 @@ def compile_model(model: tf.keras.Model, learning_rate: float, loss_fn: str = 'm
     return model
 
 def get_custom_objects():
+    from keras.layers import Lambda
+    import tensorflow as tf
+    if not getattr(Lambda, '_patched_for_keras3', False):
+        original_compute = Lambda.compute_output_shape
+        def new_compute(self, input_shape):
+            if getattr(self, '_output_shape', None) is not None:
+                if callable(self._output_shape): return self._output_shape(input_shape)
+                return self._output_shape
+            if hasattr(self, 'function') and hasattr(self.function, '__code__'):
+                freevars = self.function.__code__.co_freevars
+                if self.function.__closure__:
+                    cv = self.function.__closure__
+                    if 'n_features' in freevars and 'forecast_horizon' in freevars:
+                        nf = cv[freevars.index('n_features')].cell_contents
+                        fh = cv[freevars.index('forecast_horizon')].cell_contents
+                        return tf.TensorShape([None, nf, fh])
+                    if 'lookback' in freevars:
+                        lb = cv[freevars.index('lookback')].cell_contents
+                        return tf.TensorShape([None, lb, 1])
+            return tf.TensorShape(input_shape)
+        Lambda.compute_output_shape = new_compute
+        Lambda._patched_for_keras3 = True
+        
     return {
         'RevIN': RevIN,
         'PatchEmbedding': PatchEmbedding,
@@ -898,3 +921,29 @@ def get_custom_objects():
         'LatentBottleneckEncoder': LatentBottleneckEncoder,
         'TimePerceiverDecoder': TimePerceiverDecoder,
     }
+
+
+def fix_lambda_tf_refs(model):
+    """
+    Fix Lambda layers that lost their 'tf' reference after HDF5 deserialization.
+    Must be called AFTER load_model() and BEFORE predict().
+    """
+    import tensorflow as tf
+    from keras.layers import Lambda
+    
+    fixed = 0
+    for layer in model.layers:
+        # Check nested models (e.g. Sequential inside Functional)
+        if hasattr(layer, 'layers'):
+            for sub_layer in layer.layers:
+                if isinstance(sub_layer, Lambda) and hasattr(sub_layer, 'function'):
+                    if hasattr(sub_layer.function, '__globals__'):
+                        sub_layer.function.__globals__['tf'] = tf
+                        fixed += 1
+        if isinstance(layer, Lambda) and hasattr(layer, 'function'):
+            if hasattr(layer.function, '__globals__'):
+                layer.function.__globals__['tf'] = tf
+                fixed += 1
+    if fixed > 0:
+        print(f"[FIX] Fixed {fixed} Lambda layer(s): injected 'tf' reference.")
+    return model

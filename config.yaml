@@ -1,5 +1,5 @@
 data:
-  csv_path: data/raw/singapore_pv_bestof_v2_2020_2025.csv
+  csv_path: data/raw/tangerang_pv_weather_2020_2024_wdni.csv
   csv_separator: ;
   dhi_col: dhi_wm2
   ghi_col: ghi_wm2
@@ -25,11 +25,14 @@ features:
     time_year: true
     weather: true
   manual_features:
-  - ghi_wm2
-  - pv_output_kw
+  - ambient_temp_c
+  - hour_sin
+  - hour_cos
+  - dhi_wm2
+  - dni_wm2
   multicol_threshold: 0.95
   scaler_type: minmax
-  selection_mode: auto
+  selection_mode: manual
   target_scaler_type: minmax
 forecasting:
   horizon: 24
@@ -37,15 +40,16 @@ mlflow:
   experiment_name: PatchTST_CSI_TransferLearning
   tracking_uri: mlruns
 model:
-  architecture: gru
+  architecture: rnn
   hyperparameters:
     batch_size: 32
     d_model: 64
     dropout: 0.2
+    epochs: 100
     learning_rate: 0.001
-    lookback: 168
+    lookback: 72
+    loss: huber
     loss_fn: huber
-    moving_avg: 25
     n_layers: 2
     use_bidirectional: true
     use_revin: false
@@ -56,6 +60,7 @@ paths:
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
+  end_date: '2021-12-31'
   fix_ghi_dhi: true
   ghi_dark_pv_high: true
   ghi_high_pv_zero: true
@@ -63,10 +68,11 @@ preprocessing:
   productive_hours_threshold: 50
   remove_outliers: true
   resample_1h: true
-  subset_mode: baris
-  trim_rows: 20000
+  start_date: '2021-01-01'
+  subset_mode: tanggal
+  trim_rows: false
 pv_system:
-  nameplate_capacity_kw: 15.93
+  nameplate_capacity_kw: 4.76
   ref_temp: 25
   system_efficiency: 0.86
   temp_coeff: -0.0045
@@ -97,35 +103,22 @@ tuning:
     - 32
     d_model:
     - 64
-    - 256
+    - 128
     dropout:
     - 0.1
-    - 0.3
-    ff_dim:
-    - 128
-    - 512
+    - 0.4
     learning_rate:
     - 0.0005
     - 0.005
     lookback:
     - 24
-    - 120
+    - 96
     - 24
-    moving_avg:
-    - 25
-    - 25
-    n_heads:
-    - 4
-    - 16
     n_layers:
     - 1
     - 3
-    patch_len:
-    - 8
-    - 24
-    - 8
-    stride:
-    - 4
-    - 16
-    - 4
+    use_bidirectional:
+    - true
+    - false
+  subsample_ratio: 0.2
   use_subsampling: false

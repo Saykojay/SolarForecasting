@@ -18,16 +18,22 @@ logger = logging.getLogger(__name__)
 # SAFE PREDICT (GPU Memory-safe)
 # ============================================================
 def safe_predict(model, X, batch_size=32):
-    """Predict menggunakan generator agar aman untuk GPU memory."""
-    def input_generator():
-        for i in range(len(X)):
-            yield X[i]
-
-    dataset = tf.data.Dataset.from_generator(
-        input_generator,
-        output_signature=tf.TensorSpec(shape=X.shape[1:], dtype=tf.float32)
-    ).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return model.predict(dataset, verbose=1)
+    """
+    Prediksi yang lebih stabil untuk menghindari OOM atau iterator crash.
+    Menghindari penggunaan generator yang sering menyebabkan OUT_OF_RANGE di Keras 3.
+    """
+    try:
+        # Gunakan predict standar
+        return model.predict(X, batch_size=batch_size, verbose=0)
+    except Exception as e:
+        print(f"[WARN] Standard predict failed: {e}. Using manual batching fallback...")
+        preds = []
+        for i in range(0, len(X), batch_size):
+            batch = X[i : i + batch_size]
+            # Call model directly as a function (faster for small batches)
+            p = model(batch, training=False)
+            preds.append(p.numpy() if hasattr(p, 'numpy') else p)
+        return np.concatenate(preds, axis=0)
 
 
 # ============================================================
@@ -449,77 +455,278 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
 
 
 # ============================================================
-# TARGET DOMAIN TESTING
+# TARGET DOMAIN TESTING (Preprocessed Data)
 # ============================================================
-def test_on_target(model_path: str, target_csv: str, cfg: dict):
+def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     """
-    Menguji model yang sudah dilatih pada data target (Indonesia).
-    Hanya membutuhkan: model .keras/.h5, scalers, dan CSV data target.
+    Menguji model yang sudah dilatih pada folder preprocessed data target.
+    
+    CRITICAL: Untuk transfer learning yang benar:
+    - INPUT harus di-scale ulang menggunakan SOURCE X_scaler (dari model bundle)
+    - OUTPUT harus di-inverse-transform menggunakan SOURCE y_scaler (dari model bundle)
+    - Fitur harus diurutkan sesuai urutan yang dipakai saat training
+    - Konversi CSI → kW menggunakan clear_sky TARGET (adaptif kapasitas)
     """
     from src.model_factory import get_custom_objects
-    from src.data_prep import preprocess_algorithm1, create_features, create_sequences_with_indices
-
-    proc = cfg['paths']['processed_dir']
-    pv_cfg = cfg['pv_system']
-    horizon = cfg['forecasting']['horizon']
-    lookback = cfg['model']['hyperparameters']['lookback']
+    from src.data_prep import create_sequences_with_indices
 
     print(f"\n{'='*60}")
-    print(f"TARGET DOMAIN TESTING")
+    print(f"TARGET DOMAIN TESTING (PREPROCESSED)")
     print(f"Model: {model_path}")
-    print(f"Data:  {target_csv}")
+    print(f"Target Data Dir: {target_dir}")
     print(f"{'='*60}")
 
+    model_root = model_path if os.path.isdir(model_path) else os.path.dirname(model_path)
+
     # 1. Load model
-    if model_path.endswith('model_hf'):
+    actual_model_path = model_path
+    is_hf = os.path.isdir(model_path) and os.path.exists(os.path.join(model_path, 'config.json'))
+    
+    if is_hf:
         from src.model_hf import load_hf_wrapper
         model = load_hf_wrapper(model_path)
     else:
-        model = tf.keras.models.load_model(model_path, custom_objects=get_custom_objects())
-    print(f"Model loaded: {model.name}")
+        if os.path.isdir(model_path):
+            for ext in ['.h5', '.keras']:
+                candidate = os.path.join(model_path, f'model{ext}')
+                if os.path.exists(candidate):
+                    actual_model_path = candidate
+                    break
+        
+        # WORKAROUND: .keras as HDF5
+        import zipfile
+        if actual_model_path.endswith('.keras') and not zipfile.is_zipfile(actual_model_path):
+            print(f"[WARN] {os.path.basename(actual_model_path)} terdeteksi sebagai HDF5 file.")
+            h5_path = actual_model_path.replace('.keras', '.h5')
+            if not os.path.exists(h5_path):
+                import shutil
+                shutil.copy(actual_model_path, h5_path)
+            actual_model_path = h5_path
+            
+        model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+    
+    from src.model_factory import fix_lambda_tf_refs
+    fix_lambda_tf_refs(model)
+    print(f"Model loaded successfully.")
 
-    # 2. Load scalers
-    X_scaler = joblib.load(os.path.join(proc, 'X_scaler.pkl'))
-    y_scaler = joblib.load(os.path.join(proc, 'y_scaler.pkl'))
+    expected_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else None
+    lookback = model.input_shape[1] if hasattr(model, 'input_shape') else cfg['model']['hyperparameters']['lookback']
+    horizon = model.output_shape[1] if hasattr(model, 'output_shape') else cfg['forecasting']['horizon']
 
-    # 3. Load & preprocess target data
-    if target_csv.endswith(('.xlsx', '.xls')):
-        df_target = pd.read_excel(target_csv)
+    # 2. Load TARGET data (raw features, UNSCALED)
+    import joblib
+    try:
+        df_test = pd.read_pickle(os.path.join(target_dir, 'df_test_feats.pkl'))
+    except Exception as e:
+        raise ValueError(f"Gagal memuat df_test_feats.pkl dari {target_dir}. Detail: {e}")
+
+    # 3. Load SOURCE scalers (from MODEL bundle) - CRITICAL for correct transfer
+    source_x_scaler_path = os.path.join(model_root, 'X_scaler.pkl')
+    source_y_scaler_path = os.path.join(model_root, 'y_scaler.pkl')
+    
+    if not os.path.exists(source_x_scaler_path) or not os.path.exists(source_y_scaler_path):
+        print("[WARN] Source scalers not found in model bundle. Falling back to target scalers.")
+        print("       For accurate cross-domain results, ensure X_scaler.pkl & y_scaler.pkl are in the model folder.")
+        source_x_scaler = joblib.load(os.path.join(target_dir, 'X_scaler.pkl'))
+        source_y_scaler = joblib.load(os.path.join(target_dir, 'y_scaler.pkl'))
+        using_source_scaler = False
     else:
-        df_target = pd.read_csv(target_csv, sep=cfg['data']['csv_separator'])
-    df_target[cfg['data']['time_col']] = pd.to_datetime(
-        df_target[cfg['data']['time_col']], format=cfg['data'].get('time_format'))
-    df_target_clean = preprocess_algorithm1(df_target, cfg)
+        source_x_scaler = joblib.load(source_x_scaler_path)
+        source_y_scaler = joblib.load(source_y_scaler_path)
+        using_source_scaler = True
+        print(f"[OK] Using SOURCE scalers from model bundle for correct cross-domain evaluation.")
 
-    # 4. Create features
-    df_target_feats = create_features(df_target_clean, cfg).dropna()
+    # 4. Determine feature ordering from SOURCE (model training)
+    # Look for prep_summary.json or selected_features.json in model bundle
+    source_features = None
+    
+    # Check model meta for data_source path
+    meta_path = os.path.join(model_root, 'meta.json')
+    if os.path.exists(meta_path):
+        import json
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        data_source = meta.get('data_source', '')
+        # Fallback: if absolute path doesn't exist (e.g., trained on different machine),
+        # try relative path using the folder name
+        if data_source and not os.path.exists(data_source):
+            relative_ds = os.path.join('data', 'processed', os.path.basename(data_source))
+            if os.path.exists(relative_ds):
+                data_source = relative_ds
+        # Try to load source features from the training data directory
+        for candidate_path in [data_source, model_root]:
+            for fname in ['prep_summary.json', 'selected_features.json']:
+                fpath = os.path.join(candidate_path, fname)
+                if os.path.exists(fpath):
+                    with open(fpath, 'r') as f:
+                        data = json.load(f)
+                    if fname == 'prep_summary.json':
+                        source_features = data.get('selected_features')
+                    else:
+                        source_features = data
+                    if source_features:
+                        print(f"[OK] Source feature order loaded from: {fpath}")
+                        break
+            if source_features:
+                break
 
-    # 5. Load feature list
-    with open(os.path.join(proc, 'selected_features.json'), 'r') as f:
-        selected_features = json.load(f)
+    # Load target features order
+    target_summary_path = os.path.join(target_dir, 'prep_summary.json')
+    target_features = None
+    use_csi = True
+    if os.path.exists(target_summary_path):
+        import json
+        with open(target_summary_path, 'r') as f:
+            summ = json.load(f)
+        target_features = summ.get('selected_features')
+        if summ.get('target_col') != 'csi_target':
+            use_csi = False
 
-    # 6. Scale
-    X_target_scaled = X_scaler.transform(df_target_feats[selected_features])
-    act_target = 'csi_target' if cfg['target']['use_csi'] else cfg['data']['target_col']
-    y_target_scaled = y_scaler.transform(df_target_feats[[act_target]]).flatten()
+    print(f"\n--- Feature Alignment ---")
+    print(f"  Source features: {source_features}")
+    print(f"  Target features: {target_features}")
+    print(f"  Target mode: {'CSI' if use_csi else 'Direct Power'}")
 
-    # 7. Create sequences
-    X_seq, y_seq, indices = create_sequences_with_indices(
-        X_target_scaled, y_target_scaled, df_target_feats.index, lookback, horizon)
-    print(f"Target sequences: {X_seq.shape}")
+    # 5. Determine target column for ground truth
+    act_target = 'csi_target' if use_csi else cfg['data']['target_col']
 
-    # 8. Predict & evaluate
-    y_pred_scaled = safe_predict(model, X_seq)
-    y_pred_csi = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).reshape(y_pred_scaled.shape)
+    # 6. Re-scale target data using SOURCE X_scaler with correct feature ordering
+    if source_features and target_features:
+        # Check if all source features exist in target data
+        missing = [f for f in source_features if f not in df_test.columns]
+        if missing:
+            raise ValueError(f"Target data missing features required by model: {missing}")
+        
+        # Extract features in SOURCE order
+        X_raw = df_test[source_features].values
+        print(f"  Re-ordering target features to match source: {source_features}")
+    else:
+        # Fallback: use whatever features are available
+        if target_features:
+            X_raw = df_test[target_features].values
+        else:
+            # Last resort: load pre-scaled X_test
+            X_test = np.load(os.path.join(target_dir, 'X_test.npy'))
+            print("[WARN] Could not determine feature order. Using pre-scaled X_test directly.")
+            # In this fallback, we still need y data
+            y_test = np.load(os.path.join(target_dir, 'y_test.npy'))
+            source_features = target_features
+            # Skip re-scaling, go directly to prediction
+            X_raw = None
+    
+    if X_raw is not None:
+        # Scale with SOURCE X_scaler
+        X_scaled = source_x_scaler.transform(X_raw)
+        
+        # Get target values
+        y_raw = df_test[act_target].values
+        y_scaled = source_y_scaler.transform(y_raw.reshape(-1, 1)).flatten()
+        
+        # Create sequences
+        print(f"\nCreating sequences (lookback={lookback}, horizon={horizon})...")
+        X_test, y_test, test_indices = create_sequences_with_indices(
+            X_scaled, y_scaled, df_test.index, lookback, horizon
+        )
+        print(f"  Sequences created: X_test={X_test.shape}, y_test={y_test.shape}")
+    else:
+        # Fallback path
+        y_test = np.load(os.path.join(target_dir, 'y_test.npy'))
+        _, _, test_indices = create_sequences_with_indices(
+            np.zeros((len(df_test), 1)), np.zeros(len(df_test)),
+            df_test.index, lookback, horizon
+        )
+
+    if X_test.shape[2] != expected_n_features:
+        raise ValueError(f"Feature count mismatch after alignment: got {X_test.shape[2]}, model expects {expected_n_features}")
+
+    # 7. Predict using model
+    print("Running inference...")
+    y_pred_scaled = safe_predict(model, X_test)
+    
+    # Inverse transform with SOURCE y_scaler (model's output space!)
+    y_pred_raw = source_y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).reshape(y_pred_scaled.shape)
+
+    # 8. Convert to physical units and calculate metrics
+    pv_cfg = cfg['pv_system']
+    capacity_kw = pv_cfg['nameplate_capacity_kw']
 
     steps = np.arange(horizon)
-    pv_cs = df_target_feats['pv_clear_sky'].values[indices[:, np.newaxis] + steps]
-    pv_pred = np.clip(y_pred_csi * pv_cs, 0, pv_cfg['nameplate_capacity_kw'])
-    pv_actual = df_target_feats[cfg['data']['target_col']].values[indices[:, np.newaxis] + steps]
-    ghi = df_target_feats[cfg['data']['ghi_col']].values[indices[:, np.newaxis] + steps]
+    n_test = min(len(test_indices), len(y_pred_raw))
+    test_indices = test_indices[:n_test]
+    y_pred_raw = y_pred_raw[:n_test]
 
-    metrics = calculate_full_metrics(pv_actual, pv_pred, ghi, "TARGET",
-                                      pv_cfg['nameplate_capacity_kw'])
+    target_col = cfg['data']['target_col']
+    if target_col not in df_test.columns:
+        # Try common alternatives
+        for alt in ['pv_output_kw', 'power_kw', 'pv_kw']:
+            if alt in df_test.columns:
+                target_col = alt
+                break
 
-    print(f"\n✅ Target domain testing selesai!")
-    return metrics
+    if use_csi:
+        # CSI mode: CSI * clear_sky_target → power in target capacity
+        # DYNAMIC RECALCUALTION: Re-calculate Clear Sky using CURRENT capacity 
+        # to ensure scaling is correct even if preprocessed with wrong capacity.
+        from src.data_prep import calculate_clear_sky_pv
+        
+        # Get weather columns needed for CS
+        ghi_col = cfg['data']['ghi_col']
+        poa_col = cfg['data'].get('poa_col', ghi_col)
+        temp_col = cfg['data']['temp_col']
+        wind_col = cfg['data'].get('wind_speed_col')
+        
+        # Recalculate full CS array for df_test
+        current_pv_cs = calculate_clear_sky_pv(
+            ghi=df_test[ghi_col].values,
+            poa=df_test[poa_col].values if poa_col in df_test.columns else df_test[ghi_col].values,
+            temp_ambient=df_test[temp_col].values,
+            wind_speed=df_test[wind_col].values if wind_col and wind_col in df_test.columns else None,
+            nameplate_capacity=capacity_kw,
+            temp_coeff=pv_cfg['temp_coeff'],
+            ref_temp=pv_cfg['ref_temp'],
+            system_efficiency=pv_cfg['system_efficiency']
+        )
+        
+        pv_cs_test = current_pv_cs[test_indices[:, np.newaxis] + steps]
+        
+        if len(y_pred_raw.shape) == 3 and y_pred_raw.shape[2] == 1:
+            pv_test_pred = np.clip(y_pred_raw[:, :, 0] * pv_cs_test, 0, capacity_kw)
+        else:
+            pv_test_pred = np.clip(y_pred_raw * pv_cs_test, 0, capacity_kw)
+        
+        # Log difference to debug
+        original_cs_max = df_test['pv_clear_sky'].max()
+        print(f"[DEBUG] Recap CS: Original Max={original_cs_max:.2f}kW, Dynamic Max={current_pv_cs.max():.2f}kW")
+    else:
+        if len(y_pred_raw.shape) == 3 and y_pred_raw.shape[2] == 1:
+            pv_test_pred = np.clip(y_pred_raw[:, :, 0], 0, capacity_kw * 1.2)
+        else:
+            pv_test_pred = np.clip(y_pred_raw, 0, capacity_kw * 1.2)
+
+    pv_test_actual = df_test[target_col].values[test_indices[:, np.newaxis] + steps]
+    
+    # Apply productive hours mask
+    ghi_col = cfg['data']['ghi_col']
+    if ghi_col in df_test.columns:
+        ghi_test = df_test[ghi_col].values[test_indices[:, np.newaxis] + steps]
+    else:
+        ghi_test = np.ones_like(pv_test_actual) * 1000
+
+    wrapper_thresh = cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)
+    pv_test_pred[ghi_test < wrapper_thresh] = 0.0
+
+    # 9. Calculate metrics
+    print("Menghitung metrik akhir...")
+    
+    # Debug stats
+    print(f"\n--- Debug Transfer Stats ---")
+    print(f"  y_pred_raw (CSI) mean: {y_pred_raw.mean():.4f}, std: {y_pred_raw.std():.4f}")
+    print(f"  pv_test_pred (kW) mean: {pv_test_pred.mean():.4f}, max: {pv_test_pred.max():.4f}")
+    print(f"  pv_test_actual (kW) mean: {pv_test_actual.mean():.4f}, max: {pv_test_actual.max():.4f}")
+    print(f"  Using source scaler: {using_source_scaler}")
+    print(f"  Capacity: {capacity_kw} kW")
+    
+    m_test = calculate_full_metrics(pv_test_actual, pv_test_pred, None, f"TARGET ({os.path.basename(target_dir)})", capacity_kw)
+    
+    print(f"\n[OK] Target domain testing selesai!")
+    return m_test

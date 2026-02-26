@@ -307,7 +307,10 @@ def _load_latest_model(cfg):
     latest = sorted(files)[-1]
     path = os.path.join(model_dir, latest)
     print(f"Loading model: {path}")
-    return tf.keras.models.load_model(path, custom_objects=get_custom_objects())
+    model = tf.keras.models.load_model(path, custom_objects=get_custom_objects(), safe_mode=False)
+    from src.model_factory import fix_lambda_tf_refs
+    fix_lambda_tf_refs(model)
+    return model
 
 
 def _pick_model(cfg):
