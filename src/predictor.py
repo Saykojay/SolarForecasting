@@ -728,5 +728,20 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     
     m_test = calculate_full_metrics(pv_test_actual, pv_test_pred, None, f"TARGET ({os.path.basename(target_dir)})", capacity_kw)
     
+    # NEW: Create a detailed dataframe for export and visualization
+    # We take the 0-th step of the prediction for simplicity in time-series plotting
+    # or flatten everything if needed. Usually, 1-step or first step is standard for a quick view.
+    timestamps_test = df_test.index[test_indices + 1] # Approximately the first step of horizon
+    
+    df_results = pd.DataFrame({
+        'Timestamp': timestamps_test,
+        'Actual_kW': pv_test_actual[:, 0],
+        'Predicted_kW': pv_test_pred[:, 0],
+        'Error_kW': pv_test_actual[:, 0] - pv_test_pred[:, 0]
+    })
+    
     print(f"\n[OK] Target domain testing selesai!")
-    return m_test
+    return {
+        'metrics': m_test,
+        'df_results': df_results
+    }

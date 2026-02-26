@@ -635,12 +635,20 @@ def run_tscv(cfg: dict, data: dict = None):
     return metrics_per_fold
 
 
-def fine_tune_model(cfg, source_model_path, data=None):
+def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     """
-    Fine-tune an existing model on new data.
+    Fine-tune an existing model on new data with optional granular configuration.
+    ft_config keys:
+        - epochs: int
+        - learning_rate: float
+        - freeze_backbone: bool
+        - trainable_last_n: int (default: 2)
     """
     from src.model_factory import get_custom_objects, fix_lambda_tf_refs, compile_model
     import sys
+
+    if ft_config is None:
+        ft_config = {}
 
     # 1. Load Pre-trained Model
     print(f"\n🚀 FINE-TUNING MODE")
@@ -672,6 +680,15 @@ def fine_tune_model(cfg, source_model_path, data=None):
             model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
     
     fix_lambda_tf_refs(model)
+
+    # NEW: Layer Freezing
+    if ft_config.get('freeze_backbone', False):
+        last_n = ft_config.get('trainable_last_n', 2)
+        print(f"   Freezing backbone, keeping last {last_n} layers trainable...")
+        for layer in model.layers[:-last_n]:
+            layer.trainable = False
+        for layer in model.layers[-last_n:]:
+            layer.trainable = True
     
     # 2. Prepare Data
     if data is None:
@@ -698,8 +715,8 @@ def fine_tune_model(cfg, source_model_path, data=None):
     
     # 3. Re-compile with Lower Learning Rate
     orig_lr = cfg['model']['hyperparameters'].get('learning_rate', 0.001)
-    ft_lr = orig_lr * 0.1 # Default 10% of original LR
-    print(f"   Fine-tuning LR: {ft_lr:.6f} (Original was {orig_lr:.6f})")
+    ft_lr = ft_config.get('learning_rate', orig_lr * 0.1)
+    print(f"   Fine-tuning LR: {ft_lr:.6f} (Original config was {orig_lr:.6f})")
     
     compile_model(model, ft_lr, loss_fn=cfg['training'].get('loss_fn', 'huber'))
     
@@ -708,10 +725,13 @@ def fine_tune_model(cfg, source_model_path, data=None):
     
     # Training
     t_cfg = cfg['training']
+    epochs = ft_config.get('epochs', max(5, t_cfg.get('epochs', 20) // 2))
+    
+    print(f"   Fine-tuning for {epochs} epochs...")
     history = model.fit(
         data['X_train'], data['y_train'],
         validation_data=(data['X_test'], data['y_test']),
-        epochs=max(5, t_cfg.get('epochs', 20) // 2), 
+        epochs=epochs,
         batch_size=cfg['model']['hyperparameters'].get('batch_size', 32),
         callbacks=callbacks,
         shuffle=True, # Critical for stability

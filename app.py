@@ -3336,11 +3336,14 @@ with tab_transfer:
                             
                             with contextlib.redirect_stdout(stdout_capture):
                                 from src.predictor import test_on_preprocessed_target
-                                metrics = test_on_preprocessed_target(model_path, target_data_path, cfg)
+                                result = test_on_preprocessed_target(model_path, target_data_path, cfg)
+                                metrics = result['metrics']
+                                df_results = result['df_results']
                             
                             # Save to session state to persist across reruns (like clicking Fine-tune)
                             st.session_state.target_eval = {
                                 'metrics': metrics,
+                                'df_results': df_results,
                                 'output': stdout_capture.getvalue(),
                                 'target_folder': selected_target,
                                 'model_id': selected_model,
@@ -3364,7 +3367,46 @@ with tab_transfer:
                     col3.metric("R²", f"{m['r2']:.4f}")
                     col4.metric("MAPE", f"{m['mape']:.4f}%")
                     
-                    with st.expander("📜 Output Detail"):
+                    # --- NEW: VISUALIZATION ---
+                    st.markdown("#### 📈 Visualisasi Actual vs Predicted")
+                    df_res = eval_data['df_results']
+                    
+                    import plotly.graph_objects as go
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Actual_kW'], name="Actual (Target)", line=dict(color='#1E88E5')))
+                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Predicted_kW'], name="Predicted (Model)", line=dict(color='#FFC107', dash='dash')))
+                    
+                    fig.update_layout(
+                        title="Perbandingan Output PV (kW)",
+                        xaxis_title="Waktu",
+                        yaxis_title="Power (kW)",
+                        height=400,
+                        margin=dict(l=20, r=20, t=40, b=20),
+                        template="plotly_dark",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # --- NEW: EXPORT ---
+                    with st.expander("📥 Export & Data Detail"):
+                        st.dataframe(df_res.head(100), use_container_width=True)
+                        
+                        # Export button
+                        try:
+                            import io
+                            excel_buffer = io.BytesIO()
+                            df_res.to_excel(excel_buffer, index=False)
+                            st.download_button(
+                                label="💾 Download Hasil Prediksi Lengkap (.xlsx)",
+                                data=excel_buffer.getvalue(),
+                                file_name=f"prediksi_target_{eval_data['model_id']}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
+                        except Exception as e_exp:
+                            st.warning(f"Gagal menyiapkan export: {e_exp}")
+                    
+                    with st.expander("📜 Log Konsol Detail"):
                         st.code(eval_data['output'], language="text")
 
                     # --- FINE-TUNING SECTION ---
@@ -3375,6 +3417,17 @@ with tab_transfer:
                     khusus di data `{eval_data['target_folder']}`.
                     """)
                     
+                    # NEW: Fine-tuning Configuration UI
+                    with st.expander("⚙️ Konfigurasi Fine-tuning", expanded=False):
+                        col_ft1, col_ft2 = st.columns(2)
+                        with col_ft1:
+                            ft_epochs = st.number_input("Epochs", min_value=1, max_value=100, value=10, key="ft_epoch_input")
+                            ft_freeze = st.checkbox("Freeze Backbone", value=True, help="Jika dicentang, hanya layer output terakhir yang akan dilatih.", key="ft_freeze_check")
+                        with col_ft2:
+                            current_lr = cfg['model']['hyperparameters'].get('learning_rate', 0.001)
+                            ft_lr = st.number_input("Learning Rate", min_value=0.000001, max_value=0.1, value=current_lr*0.1, format="%.6f", key="ft_lr_input")
+                            ft_last_n = st.number_input("Last N Layers Trainable", min_value=1, max_value=20, value=2, disabled=not ft_freeze, key="ft_last_n_input")
+
                     if st.button("🔥 Start Fine-Tuning on Target Data", 
                                 type="secondary", use_container_width=True, key="run_fine_tune_btn"):
                         with st.spinner("🚀 Melakukan Fine-tuning..."):
@@ -3386,7 +3439,15 @@ with tab_transfer:
                                 cfg_target = cfg.copy()
                                 cfg_target['paths']['processed_dir'] = os.path.join(processed_root, eval_data['target_folder'])
                                 
-                                ft_model, ft_history, ft_id = fine_tune_model(cfg_target, model_path)
+                                # Prepare ft_config
+                                ft_config = {
+                                    'epochs': ft_epochs,
+                                    'learning_rate': ft_lr,
+                                    'freeze_backbone': ft_freeze,
+                                    'trainable_last_n': ft_last_n
+                                }
+                                
+                                ft_model, ft_history, ft_id = fine_tune_model(cfg_target, model_path, ft_config=ft_config)
                                 
                                 st.success(f"✅ Fine-tuning Berhasil! Model baru: **{ft_id}**")
                                 st.session_state.pipeline_log.append(f"[{datetime.now():%H:%M:%S}] Fine-tuned {eval_data['model_id']} -> {ft_id}")
