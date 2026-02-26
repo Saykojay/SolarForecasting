@@ -907,7 +907,29 @@ def get_custom_objects():
         Lambda.compute_output_shape = new_compute
         Lambda._patched_for_keras3 = True
         
-    from keras.layers import GRU, LSTM, SimpleRNN, TimeDistributed, Bidirectional, RNN, Concatenate, Add, Multiply, GlobalAveragePooling1D, GlobalMaxPooling1D
+    import inspect
+    from keras.layers import GRU as KerasGRU, LSTM as KerasLSTM, SimpleRNN as KerasSimpleRNN
+    from keras.layers import TimeDistributed, Bidirectional, RNN, Concatenate, Add, Multiply, GlobalAveragePooling1D, GlobalMaxPooling1D
+
+    # Robust wrapper classes to filter out unrecognized kwargs during deserialization
+    class RobustGRU(KerasGRU):
+        def __init__(self, **kwargs):
+            # Get valid arguments for Keras GRU __init__
+            valid_args = inspect.signature(KerasGRU.__init__).parameters.keys()
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+            super().__init__(**filtered_kwargs)
+
+    class RobustLSTM(KerasLSTM):
+        def __init__(self, **kwargs):
+            valid_args = inspect.signature(KerasLSTM.__init__).parameters.keys()
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+            super().__init__(**filtered_kwargs)
+
+    class RobustSimpleRNN(KerasSimpleRNN):
+        def __init__(self, **kwargs):
+            valid_args = inspect.signature(KerasSimpleRNN.__init__).parameters.keys()
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+            super().__init__(**filtered_kwargs)
     
     return {
         'RevIN': RevIN,
@@ -922,9 +944,9 @@ def get_custom_objects():
         'CrossAttentionBlock': CrossAttentionBlock,
         'LatentBottleneckEncoder': LatentBottleneckEncoder,
         'TimePerceiverDecoder': TimePerceiverDecoder,
-        'GRU': GRU,
-        'LSTM': LSTM,
-        'SimpleRNN': SimpleRNN,
+        'GRU': RobustGRU,
+        'LSTM': RobustLSTM,
+        'SimpleRNN': RobustSimpleRNN,
         'RNN': RNN,
         'TimeDistributed': TimeDistributed,
         'Bidirectional': Bidirectional,
