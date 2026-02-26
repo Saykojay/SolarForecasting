@@ -907,6 +907,8 @@ def get_custom_objects():
         Lambda.compute_output_shape = new_compute
         Lambda._patched_for_keras3 = True
         
+    from keras.layers import GRU, LSTM, SimpleRNN, TimeDistributed, Bidirectional, RNN, Concatenate, Add, Multiply, GlobalAveragePooling1D, GlobalMaxPooling1D
+    
     return {
         'RevIN': RevIN,
         'PatchEmbedding': PatchEmbedding,
@@ -920,6 +922,17 @@ def get_custom_objects():
         'CrossAttentionBlock': CrossAttentionBlock,
         'LatentBottleneckEncoder': LatentBottleneckEncoder,
         'TimePerceiverDecoder': TimePerceiverDecoder,
+        'GRU': GRU,
+        'LSTM': LSTM,
+        'SimpleRNN': SimpleRNN,
+        'RNN': RNN,
+        'TimeDistributed': TimeDistributed,
+        'Bidirectional': Bidirectional,
+        'Concatenate': Concatenate,
+        'Add': Add,
+        'Multiply': Multiply,
+        'GlobalAveragePooling1D': GlobalAveragePooling1D,
+        'GlobalMaxPooling1D': GlobalMaxPooling1D,
     }
 
 
