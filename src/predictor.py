@@ -503,11 +503,48 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 shutil.copy(actual_model_path, h5_path)
             actual_model_path = h5_path
             
-        model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+        model_loaded = False
+        try:
+            model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+            model_loaded = True
+        except Exception as load_err:
+            if "bad marshal data" in str(load_err).lower() or "unknown type code" in str(load_err).lower():
+                print(f"[RECOVER] Terjadi error marshal (Python version mismatch). Mencoba membangun ulang model...")
+                from src.model_factory import build_model
+                
+                # Coba baca meta.json untuk dapet info architecture dll
+                m_meta = {}
+                meta_path = os.path.join(model_root, 'meta.json')
+                if os.path.exists(meta_path):
+                    import json
+                    with open(meta_path, 'r') as f: m_meta = json.load(f)
+                
+                arch = m_meta.get('architecture', cfg['model']['architecture'])
+                lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                nf = m_meta.get('n_features', 0)
+                hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
+                hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                
+                # Build fresh model
+                model = build_model(arch, lb, nf, hz, hp)
+                
+                # Load weights only
+                try:
+                    model.load_weights(actual_model_path)
+                    print(f"[OK] Model berhasil dibangun ulang dan bobot dimuat (BYPASS MARSHAL).")
+                    model_loaded = True
+                except Exception as w_err:
+                    print(f"[ERR] Gagal memuat bobot: {w_err}")
+                    raise load_err # Lempar error asli jika gagal
+            else:
+                raise load_err # Lempar error asli jika bukan masalah marshal
     
     from src.model_factory import fix_lambda_tf_refs
-    fix_lambda_tf_refs(model)
-    print(f"Model loaded successfully.")
+    if model_loaded:
+        fix_lambda_tf_refs(model)
+        print(f"Model loaded successfully.")
+    else:
+        raise ValueError("Model failed to load.")
 
     expected_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else None
     lookback = model.input_shape[1] if hasattr(model, 'input_shape') else cfg['model']['hyperparameters']['lookback']
