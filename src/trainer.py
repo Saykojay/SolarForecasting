@@ -740,8 +740,24 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     
     # 5. Save as New Version
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    model_id = f"ft_{timestamp}_{cfg['model']['architecture']}"
+    
+    # Custom Name Logic
+    custom_name = ft_config.get('custom_name', '').strip()
+    if custom_name:
+        # Sanitize name
+        import re
+        custom_name = re.sub(r'[^\w\-_\.]', '_', custom_name)
+        model_id = f"ft_{custom_name}"
+    else:
+        model_id = f"ft_{timestamp}_{cfg['model']['architecture']}"
+        
     save_dir = os.path.join(cfg['paths']['models_dir'], model_id)
+    
+    # Handle existing directory to avoid overwriting unless intended (or just add suffix)
+    if os.path.exists(save_dir) and custom_name:
+        model_id = f"{model_id}_{timestamp}"
+        save_dir = os.path.join(cfg['paths']['models_dir'], model_id)
+        
     os.makedirs(save_dir, exist_ok=True)
     
     model_path = os.path.join(save_dir, "model.keras")

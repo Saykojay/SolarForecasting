@@ -3454,6 +3454,7 @@ with tab_transfer:
                     
                     # NEW: Fine-tuning Configuration UI
                     with st.expander("⚙️ Konfigurasi Fine-tuning", expanded=False):
+                        ft_name = st.text_input("Nama Model Baru (Optional)", placeholder="Misal: model_tangerang_v1", help="Jika dikosongkan, nama akan otomatis menggunakan timestamp.", key="ft_name_input")
                         col_ft1, col_ft2 = st.columns(2)
                         with col_ft1:
                             ft_epochs = st.number_input("Epochs", min_value=1, max_value=100, value=10, key="ft_epoch_input")
@@ -3464,7 +3465,7 @@ with tab_transfer:
                             ft_last_n = st.number_input("Last N Layers Trainable", min_value=1, max_value=20, value=2, disabled=not ft_freeze, key="ft_last_n_input")
 
                     if st.button("🔥 Start Fine-Tuning on Target Data", 
-                                type="secondary", use_container_width=True, key="run_fine_tune_btn"):
+                                 type="secondary", use_container_width=True, key="run_fine_tune_btn"):
                         with st.spinner("🚀 Melakukan Fine-tuning..."):
                             try:
                                 from src.trainer import fine_tune_model
@@ -3479,7 +3480,8 @@ with tab_transfer:
                                     'epochs': ft_epochs,
                                     'learning_rate': ft_lr,
                                     'freeze_backbone': ft_freeze,
-                                    'trainable_last_n': ft_last_n
+                                    'trainable_last_n': ft_last_n,
+                                    'custom_name': ft_name
                                 }
                                 
                                 ft_model, ft_history, ft_id = fine_tune_model(cfg_target, model_path, ft_config=ft_config)
