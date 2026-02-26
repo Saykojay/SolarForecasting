@@ -678,7 +678,10 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
 
     # 7. Predict using model
     print("Running inference...")
+    import time
+    start_time = time.time()
     y_pred_scaled = safe_predict(model, X_test)
+    inference_time = time.time() - start_time
     
     # Inverse transform with SOURCE y_scaler (model's output space!)
     y_pred_raw = source_y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).reshape(y_pred_scaled.shape)
@@ -762,23 +765,19 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     print(f"  pv_test_actual (kW) mean: {pv_test_actual.mean():.4f}, max: {pv_test_actual.max():.4f}")
     print(f"  Using source scaler: {using_source_scaler}")
     print(f"  Capacity: {capacity_kw} kW")
+    print(f"  Inference Time: {inference_time:.4f}s")
     
     m_test = calculate_full_metrics(pv_test_actual, pv_test_pred, None, f"TARGET ({os.path.basename(target_dir)})", capacity_kw)
     
-    # NEW: Create a detailed dataframe for export and visualization
-    # We take the 0-th step of the prediction for simplicity in time-series plotting
-    # or flatten everything if needed. Usually, 1-step or first step is standard for a quick view.
-    timestamps_test = df_test.index[test_indices + 1] # Approximately the first step of horizon
-    
-    df_results = pd.DataFrame({
-        'Timestamp': timestamps_test,
-        'Actual_kW': pv_test_actual[:, 0],
-        'Predicted_kW': pv_test_pred[:, 0],
-        'Error_kW': pv_test_actual[:, 0] - pv_test_pred[:, 0]
-    })
+    # NEW: Prepare data for export and multi-step visualization
+    timestamps_test = df_test.index[test_indices]
     
     print(f"\n[OK] Target domain testing selesai!")
     return {
         'metrics': m_test,
-        'df_results': df_results
+        'inference_time': inference_time,
+        'timestamps': timestamps_test,
+        'actual_full': pv_test_actual,
+        'pred_full': pv_test_pred,
+        'horizon': horizon
     }

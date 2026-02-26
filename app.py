@@ -3337,13 +3337,15 @@ with tab_transfer:
                             with contextlib.redirect_stdout(stdout_capture):
                                 from src.predictor import test_on_preprocessed_target
                                 result = test_on_preprocessed_target(model_path, target_data_path, cfg)
-                                metrics = result['metrics']
-                                df_results = result['df_results']
                             
                             # Save to session state to persist across reruns (like clicking Fine-tune)
                             st.session_state.target_eval = {
-                                'metrics': metrics,
-                                'df_results': df_results,
+                                'metrics': result['metrics'],
+                                'inference_time': result['inference_time'],
+                                'timestamps': result['timestamps'],
+                                'actual_full': result['actual_full'],
+                                'pred_full': result['pred_full'],
+                                'horizon': result['horizon'],
                                 'output': stdout_capture.getvalue(),
                                 'target_folder': selected_target,
                                 'model_id': selected_model,
@@ -3361,23 +3363,53 @@ with tab_transfer:
                     st.success(f"Hasil Evaluasi: **{eval_data['model_id']}** pada data **{eval_data['target_folder']}**")
                     
                     m = eval_data['metrics']
-                    col1, col2, col3, col4 = st.columns(4)
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("MAE", f"{m['mae']:.4f}")
                     col2.metric("RMSE", f"{m['rmse']:.4f}")
                     col3.metric("R²", f"{m['r2']:.4f}")
                     col4.metric("MAPE", f"{m['mape']:.4f}%")
+                    col5.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
                     
-                    # --- NEW: VISUALIZATION ---
-                    st.markdown("#### 📈 Visualisasi Actual vs Predicted")
-                    df_res = eval_data['df_results']
+                    # --- NEW: STEP SELECTION ---
+                    st.markdown("#### 📈 Visualisasi & Analisis Forecast")
+                    horizon = eval_data['horizon']
+                    selected_step = st.slider("Pilih Forecast Step (T+n jam):", 1, horizon, 1, help="Pilih jam ke berapa dari hasil prediksi yang ingin dilihat di grafik dan tabel.")
+                    step_idx = selected_step - 1
+
+                    # Rebuild DataFrame for the selected step
+                    df_res = pd.DataFrame({
+                        'Timestamp': eval_data['timestamps'],
+                        'Actual_kW': eval_data['actual_full'][:, step_idx],
+                        'Predicted_kW': eval_data['pred_full'][:, step_idx],
+                        'Error_kW': eval_data['actual_full'][:, step_idx] - eval_data['pred_full'][:, step_idx]
+                    })
+
+                    # --- NEW: DATE RANGE FILTER ---
+                    min_ts = df_res['Timestamp'].min()
+                    max_ts = df_res['Timestamp'].max()
+                    
+                    st.markdown(f"🗓️ **Filter Rentang Waktu** (Tersedia: {min_ts.strftime('%d %b %Y')} - {max_ts.strftime('%d %b %Y')})")
+                    date_range = st.date_input(
+                        "Pilih rentang tanggal untuk dianalisis:",
+                        value=(min_ts.date(), max_ts.date()),
+                        min_value=min_ts.date(),
+                        max_value=max_ts.date(),
+                        key="target_eval_date_filter"
+                    )
+                    
+                    # Apply date filtering
+                    if isinstance(date_range, tuple) and len(date_range) == 2:
+                        start_date, end_date = date_range
+                        df_res = df_res[(df_res['Timestamp'].dt.date >= start_date) & 
+                                        (df_res['Timestamp'].dt.date <= end_date)].copy()
                     
                     import plotly.graph_objects as go
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Actual_kW'], name="Actual (Target)", line=dict(color='#1E88E5')))
-                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Predicted_kW'], name="Predicted (Model)", line=dict(color='#FFC107', dash='dash')))
+                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Actual_kW'], name=f"Actual (T+{selected_step})", line=dict(color='#1E88E5')))
+                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Predicted_kW'], name=f"Predicted (T+{selected_step})", line=dict(color='#FFC107', dash='dash')))
                     
                     fig.update_layout(
-                        title="Perbandingan Output PV (kW)",
+                        title=f"Perbandingan Output PV Jam ke-{selected_step} (kW)",
                         xaxis_title="Waktu",
                         yaxis_title="Power (kW)",
                         height=400,
@@ -3389,6 +3421,7 @@ with tab_transfer:
 
                     # --- NEW: EXPORT ---
                     with st.expander("📥 Export & Data Detail"):
+                        st.info(f"Menampilkan data untuk prediksi step **T+{selected_step}**")
                         st.dataframe(df_res.head(100), use_container_width=True)
                         
                         # Export button
@@ -3397,9 +3430,9 @@ with tab_transfer:
                             excel_buffer = io.BytesIO()
                             df_res.to_excel(excel_buffer, index=False)
                             st.download_button(
-                                label="💾 Download Hasil Prediksi Lengkap (.xlsx)",
+                                label=f"💾 Download Hasil Prediksi T+{selected_step} (.xlsx)",
                                 data=excel_buffer.getvalue(),
-                                file_name=f"prediksi_target_{eval_data['model_id']}.xlsx",
+                                file_name=f"prediksi_T{selected_step}_{eval_data['model_id']}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True
                             )
