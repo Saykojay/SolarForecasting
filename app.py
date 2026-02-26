@@ -3370,13 +3370,15 @@ with tab_transfer:
                     col4.metric("MAPE", f"{m['mape']:.4f}%")
                     col5.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
                     
-                    # --- NEW: STEP SELECTION ---
+                    # --- NEW: VISUALIZATION & ANALYSIS ---
                     st.markdown("#### 📈 Visualisasi & Analisis Forecast")
-                    horizon = eval_data['horizon']
-                    selected_step = st.slider("Pilih Forecast Step (T+n jam):", 1, horizon, 1, help="Pilih jam ke berapa dari hasil prediksi yang ingin dilihat di grafik dan tabel.")
-                    step_idx = selected_step - 1
+                    
+                    # Rebuild DataFrame for continuous time-series plotting
+                    # We'll default to looking at T+1 for the primary line chart if flattened view is too complex, 
+                    # but here we'll simplify to show the first step (T+1) by default since horizon is 24h.
+                    step_idx = 0 
+                    selected_step = 1
 
-                    # Rebuild DataFrame for the selected step
                     df_res = pd.DataFrame({
                         'Timestamp': eval_data['timestamps'],
                         'Actual_kW': eval_data['actual_full'][:, step_idx],
