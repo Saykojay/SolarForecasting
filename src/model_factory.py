@@ -11,6 +11,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import inspect
+from keras.layers import GRU as KerasGRU, LSTM as KerasLSTM, SimpleRNN as KerasSimpleRNN
+
+@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+class RobustGRU(KerasGRU):
+    def __init__(self, **kwargs):
+        sig = inspect.signature(KerasGRU.__init__)
+        valid_args = sig.parameters.keys()
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+        super().__init__(**filtered_kwargs)
+
+@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+class RobustLSTM(KerasLSTM):
+    def __init__(self, **kwargs):
+        sig = inspect.signature(KerasLSTM.__init__)
+        valid_args = sig.parameters.keys()
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+        super().__init__(**filtered_kwargs)
+
+@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+class RobustSimpleRNN(KerasSimpleRNN):
+    def __init__(self, **kwargs):
+        sig = inspect.signature(KerasSimpleRNN.__init__)
+        valid_args = sig.parameters.keys()
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
+        super().__init__(**filtered_kwargs)
+
 # ============================================================
 # PATCHTST CUSTOM LAYERS (ICLR 2023 COMPLIANT)
 # ============================================================
@@ -907,29 +934,7 @@ def get_custom_objects():
         Lambda.compute_output_shape = new_compute
         Lambda._patched_for_keras3 = True
         
-    import inspect
-    from keras.layers import GRU as KerasGRU, LSTM as KerasLSTM, SimpleRNN as KerasSimpleRNN
     from keras.layers import TimeDistributed, Bidirectional, RNN, Concatenate, Add, Multiply, GlobalAveragePooling1D, GlobalMaxPooling1D
-
-    # Robust wrapper classes to filter out unrecognized kwargs during deserialization
-    class RobustGRU(KerasGRU):
-        def __init__(self, **kwargs):
-            # Get valid arguments for Keras GRU __init__
-            valid_args = inspect.signature(KerasGRU.__init__).parameters.keys()
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
-            super().__init__(**filtered_kwargs)
-
-    class RobustLSTM(KerasLSTM):
-        def __init__(self, **kwargs):
-            valid_args = inspect.signature(KerasLSTM.__init__).parameters.keys()
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
-            super().__init__(**filtered_kwargs)
-
-    class RobustSimpleRNN(KerasSimpleRNN):
-        def __init__(self, **kwargs):
-            valid_args = inspect.signature(KerasSimpleRNN.__init__).parameters.keys()
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
-            super().__init__(**filtered_kwargs)
     
     return {
         'RevIN': RevIN,
@@ -945,8 +950,11 @@ def get_custom_objects():
         'LatentBottleneckEncoder': LatentBottleneckEncoder,
         'TimePerceiverDecoder': TimePerceiverDecoder,
         'GRU': RobustGRU,
+        'RobustGRU': RobustGRU,
         'LSTM': RobustLSTM,
+        'RobustLSTM': RobustLSTM,
         'SimpleRNN': RobustSimpleRNN,
+        'RobustSimpleRNN': RobustSimpleRNN,
         'RNN': RNN,
         'TimeDistributed': TimeDistributed,
         'Bidirectional': Bidirectional,
