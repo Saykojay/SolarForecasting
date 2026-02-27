@@ -2887,14 +2887,26 @@ with tab_eval:
                                                 try:
                                                     with open(mp, 'r', encoding='utf-8') as ff: m_meta_r = json.load(ff)
                                                 except: pass
-                                            from src.model_factory import build_model as bm
+                                            
                                             arch = m_meta_r.get('architecture', cfg['model']['architecture'])
                                             hp_r = m_meta_r.get('hyperparameters', cfg['model']['hyperparameters'])
-                                            model = bm(arch,
-                                                       m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback']),
-                                                       m_meta_r.get('n_features', 1),
-                                                       m_meta_r.get('horizon', cfg['forecasting']['horizon']),
-                                                       hp_r)
+                                            lb = m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                                            nf = m_meta_r.get('n_features', 0)
+                                            hz = m_meta_r.get('horizon', cfg['forecasting']['horizon'])
+                                            
+                                            if nf == 0:
+                                                prep_p = os.path.join(model_root, 'prep_summary.json')
+                                                if os.path.exists(prep_p):
+                                                    try:
+                                                        with open(prep_p, 'r') as f:
+                                                            p_m = json.load(f)
+                                                            if n_f := p_m.get('n_features'): nf = n_f
+                                                            if l_b := p_m.get('lookback'): lb = l_b
+                                                            if h_z := p_m.get('horizon'): hz = h_z
+                                                    except: pass
+                                            
+                                            from src.model_factory import build_model as bm
+                                            model = bm(arch, lb, nf, hz, hp_r)
                                             model.load_weights(weights_h5)
                                             st.toast(f"Model dimuat via Keras 3 ZIP recovery ({arch})")
                                         else:
@@ -3670,14 +3682,26 @@ with tab_compare:
                                                         try:
                                                             with open(mp, 'r', encoding='utf-8') as ff: m_meta_r = json.load(ff)
                                                         except: pass
-                                                    from src.model_factory import build_model as bm
+                                                    
                                                     arch = m_meta_r.get('architecture', cfg['model']['architecture'])
                                                     hp_r = m_meta_r.get('hyperparameters', cfg['model']['hyperparameters'])
-                                                    model = bm(arch,
-                                                               m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback']),
-                                                               m_meta_r.get('n_features', 1),
-                                                               m_meta_r.get('horizon', cfg['forecasting']['horizon']),
-                                                               hp_r)
+                                                    lb = m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                                                    nf = m_meta_r.get('n_features', 0)
+                                                    hz = m_meta_r.get('horizon', cfg['forecasting']['horizon'])
+                                                    
+                                                    if nf == 0:
+                                                        prep_p = os.path.join(model_root, 'prep_summary.json')
+                                                        if os.path.exists(prep_p):
+                                                            try:
+                                                                with open(prep_p, 'r') as f:
+                                                                    p_m = json.load(f)
+                                                                    if n_f := p_m.get('n_features'): nf = n_f
+                                                                    if l_b := p_m.get('lookback'): lb = l_b
+                                                                    if h_z := p_m.get('horizon'): hz = h_z
+                                                            except: pass
+                                                    
+                                                    from src.model_factory import build_model as bm
+                                                    model = bm(arch, lb, nf, hz, hp_r)
                                                     model.load_weights(weights_h5)
                                                 else:
                                                     raise ke3_err

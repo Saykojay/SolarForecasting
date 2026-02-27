@@ -545,8 +545,21 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                     hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
                     hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
                     
+                    # Fallback: check prep_summary.json if meta is incomplete
                     if nf == 0:
-                        raise ValueError(f"Tidak bisa rebuild model: n_features=0 di meta.json. Pastikan meta.json di '{model_root}' memiliki informasi lengkap.")
+                        prep_path = os.path.join(model_root, 'prep_summary.json')
+                        if os.path.exists(prep_path):
+                            try:
+                                with open(prep_path, 'r') as f:
+                                    p_meta = _json.load(f)
+                                    nf = p_meta.get('n_features', 0)
+                                    if n_features_config := p_meta.get('n_features'): nf = n_features_config
+                                    if lookback_config := p_meta.get('lookback'): lb = lookback_config
+                                    if horizon_config := p_meta.get('horizon'): hz = horizon_config
+                            except: pass
+                    
+                    if nf == 0:
+                        raise ValueError(f"Tidak bisa rebuild model: n_features=0 di meta.json/prep_summary.json. Pastikan meta.json di '{model_root}' memiliki informasi lengkap.")
                     
                     model = build_model(arch, lb, nf, hz, hp)
                     compile_model(model, hp.get('learning_rate', cfg['model']['hyperparameters']['learning_rate']))
@@ -581,6 +594,18 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 nf = m_meta.get('n_features', 0)
                 hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
                 hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                
+                # Fallback prep_summary
+                if nf == 0:
+                    prep_path = os.path.join(model_root, 'prep_summary.json')
+                    if os.path.exists(prep_path):
+                        try:
+                            with open(prep_path, 'r') as f:
+                                p_meta = json.load(f)
+                                if n_features_config := p_meta.get('n_features'): nf = n_features_config
+                                if lookback_config := p_meta.get('lookback'): lb = lookback_config
+                                if horizon_config := p_meta.get('horizon'): hz = horizon_config
+                        except: pass
                 
                 model = build_model(arch, lb, nf, hz, hp)
                 

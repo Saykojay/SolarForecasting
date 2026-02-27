@@ -695,11 +695,22 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
                 from src.model_factory import build_model, compile_model
                 arch = m_meta.get('architecture', cfg['model']['architecture'])
                 hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
-                model = build_model(arch,
-                                    m_meta.get('lookback', cfg['model']['hyperparameters']['lookback']),
-                                    m_meta.get('n_features', 1),
-                                    m_meta.get('horizon', cfg['forecasting']['horizon']),
-                                    hp)
+                lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                nf = m_meta.get('n_features', 0)
+                hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
+                
+                if nf == 0:
+                    prep_p = os.path.join(model_root, 'prep_summary.json')
+                    if os.path.exists(prep_p):
+                        try:
+                            with open(prep_p, 'r') as f:
+                                p_m = _json.load(f)
+                                if n_f := p_m.get('n_features'): nf = n_f
+                                if l_b := p_m.get('lookback'): lb = l_b
+                                if h_z := p_m.get('horizon'): hz = h_z
+                        except: pass
+                        
+                model = build_model(arch, lb, nf, hz, hp)
                 model.load_weights(weights_h5)
                 print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded.")
             else:
