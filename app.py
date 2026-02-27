@@ -2776,9 +2776,13 @@ with tab_eval:
                 
                 # Model Info Preview
                 model_info_path = os.path.join(model_dir, model_to_eval, "meta.json")
+                m_meta = {}
                 if os.path.exists(model_info_path):
-                    with open(model_info_path, 'r') as f:
-                        m_meta = json.load(f)
+                    try:
+                        with open(model_info_path, 'r', encoding='utf-8') as f:
+                            m_meta = json.load(f)
+                    except Exception:
+                        pass # Handle likely OneDrive online-only or locked file
                         
                     feat_text = "N/A"
                     ds_path = m_meta.get('data_source', '').replace('\\', '/')
@@ -2852,7 +2856,10 @@ with tab_eval:
                                             import shutil
                                             shutil.copy(model_path, h5_path)
                                         model_path = h5_path
-                                    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                    try:
+                                        model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                    except TypeError:
+                                        model = tf.keras.models.load_model(model_path, compile=False)
                                     from src.model_factory import fix_lambda_tf_refs
                                     fix_lambda_tf_refs(model)
                                     compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
@@ -2875,9 +2882,12 @@ with tab_eval:
                             # SMART FIX: If it's a feature mismatch, offer to switch data version
                             if "Mismatch Fitur" in err_msg or "Inkompatibilitas Fitur" in err_msg:
                                 model_info_path = os.path.join(model_dir, model_to_eval, "meta.json")
+                                m_meta = {}
                                 if os.path.exists(model_info_path):
-                                    with open(model_info_path, 'r') as f:
-                                        m_meta = json.load(f)
+                                    try:
+                                        with open(model_info_path, 'r', encoding='utf-8') as f:
+                                            m_meta = json.load(f)
+                                    except: pass
                                     orig_raw = m_meta.get('data_source', '')
                                     orig_path = orig_raw.replace('\\', '/')
                                     
@@ -2932,11 +2942,13 @@ with tab_eval:
         train_time_str = "N/A"
         model_info_path = os.path.join(model_dir, disp_model, "meta.json")
         if os.path.exists(model_info_path):
-            with open(model_info_path, 'r') as f:
-                _meta = json.load(f)
-                seconds = _meta.get('training_time_seconds', 0)
-                if seconds > 0:
-                    train_time_str = float(seconds)
+            try:
+                with open(model_info_path, 'r', encoding='utf-8') as f:
+                    _meta = json.load(f)
+                    seconds = _meta.get('training_time_seconds', 0)
+                    if seconds > 0:
+                        train_time_str = float(seconds)
+            except: pass
                     
         r2_diff = m_train['r2'] - m_test['r2']
         
@@ -3577,7 +3589,10 @@ with tab_compare:
                                                     import shutil
                                                     shutil.copy(model_path, h5_path)
                                                 model_path = h5_path
-                                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                            try:
+                                                model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                            except TypeError:
+                                                model = tf.keras.models.load_model(model_path, compile=False)
                                             from src.model_factory import fix_lambda_tf_refs
                                             fix_lambda_tf_refs(model)
                                             compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
