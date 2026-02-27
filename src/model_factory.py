@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 import inspect
 from keras.layers import GRU as KerasGRU, LSTM as KerasLSTM, SimpleRNN as KerasSimpleRNN
 
-@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+
 class RobustGRU(KerasGRU):
     def __init__(self, **kwargs):
         sig = inspect.signature(KerasGRU.__init__)
@@ -22,7 +22,7 @@ class RobustGRU(KerasGRU):
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
         super().__init__(**filtered_kwargs)
 
-@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+
 class RobustLSTM(KerasLSTM):
     def __init__(self, **kwargs):
         sig = inspect.signature(KerasLSTM.__init__)
@@ -30,7 +30,7 @@ class RobustLSTM(KerasLSTM):
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_args or k == 'kwargs'}
         super().__init__(**filtered_kwargs)
 
-@tf.keras.utils.register_keras_serializable(package="src.model_factory")
+
 class RobustSimpleRNN(KerasSimpleRNN):
     def __init__(self, **kwargs):
         sig = inspect.signature(KerasSimpleRNN.__init__)
@@ -990,3 +990,10 @@ def fix_lambda_tf_refs(model):
     if fixed > 0:
         print(f"[FIX] Fixed {fixed} Lambda layer(s): injected 'tf' reference.")
     return model
+
+# Safe registration for Streamlit reloads
+for cls in [RobustGRU, RobustLSTM, RobustSimpleRNN]:
+    try:
+        tf.keras.utils.register_keras_serializable(package="src.model_factory")(cls)
+    except ValueError:
+        pass
