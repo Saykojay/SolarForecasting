@@ -710,9 +710,10 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
                                 if h_z := p_m.get('horizon'): hz = h_z
                         except: pass
                         
+                from src.model_factory import manual_load_k3_weights
                 model = build_model(arch, lb, nf, hz, hp)
-                model.load_weights(weights_h5)
-                print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded.")
+                manual_load_k3_weights(model, weights_h5)
+                print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded manual.")
             else:
                 raise e1
         else:

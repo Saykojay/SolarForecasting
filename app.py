@@ -2905,9 +2905,9 @@ with tab_eval:
                                                             if h_z := p_m.get('horizon'): hz = h_z
                                                     except: pass
                                             
-                                            from src.model_factory import build_model as bm
+                                            from src.model_factory import build_model as bm, manual_load_k3_weights
                                             model = bm(arch, lb, nf, hz, hp_r)
-                                            model.load_weights(weights_h5)
+                                            manual_load_k3_weights(model, weights_h5)
                                             st.toast(f"Model dimuat via Keras 3 ZIP recovery ({arch})")
                                         else:
                                             raise ke3_err
@@ -3700,9 +3700,9 @@ with tab_compare:
                                                                     if h_z := p_m.get('horizon'): hz = h_z
                                                             except: pass
                                                     
-                                                    from src.model_factory import build_model as bm
+                                                    from src.model_factory import build_model as bm, manual_load_k3_weights
                                                     model = bm(arch, lb, nf, hz, hp_r)
-                                                    model.load_weights(weights_h5)
+                                                    manual_load_k3_weights(model, weights_h5)
                                                 else:
                                                     raise ke3_err
                                             from src.model_factory import fix_lambda_tf_refs
