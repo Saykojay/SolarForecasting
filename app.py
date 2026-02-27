@@ -12,8 +12,15 @@ import sys
 # Newer NumPy uses 'numpy._core' while older ones use 'numpy.core'.
 try:
     import numpy as np
+    import sys
     if not hasattr(np, '_core'):
         sys.modules['numpy._core'] = np.core
+        sys.modules['numpy._core.numeric'] = np.core.numeric
+        sys.modules['numpy._core.multiarray'] = np.core.multiarray
+        sys.modules['numpy._core.umath'] = np.core.umath
+        sys.modules['numpy._core.fromnumeric'] = np.core.fromnumeric
+        sys.modules['numpy._core.defchararray'] = np.core.defchararray
+        sys.modules['numpy._core.records'] = np.core.records
 except: pass
 
 # ============================================================
