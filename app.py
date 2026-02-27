@@ -2868,9 +2868,37 @@ with tab_eval:
                                             shutil.copy(model_path, h5_path)
                                         model_path = h5_path
                                     try:
-                                        model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-                                    except TypeError:
-                                        model = tf.keras.models.load_model(model_path, compile=False)
+                                        try:
+                                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                        except TypeError:
+                                            model = tf.keras.models.load_model(model_path, compile=False)
+                                    except OSError as ke3_err:
+                                        # Keras 3 ZIP format on TF 2.x
+                                        if model_path.endswith('.keras') and zipfile.is_zipfile(model_path):
+                                            extract_dir = os.path.join(model_root, '_extracted_k3')
+                                            os.makedirs(extract_dir, exist_ok=True)
+                                            with zipfile.ZipFile(model_path, 'r') as zf:
+                                                zf.extractall(extract_dir)
+                                            weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                                            
+                                            m_meta_r = {}
+                                            mp = os.path.join(model_root, 'meta.json')
+                                            if os.path.exists(mp):
+                                                try:
+                                                    with open(mp, 'r', encoding='utf-8') as ff: m_meta_r = json.load(ff)
+                                                except: pass
+                                            from src.model_factory import build_model as bm
+                                            arch = m_meta_r.get('architecture', cfg['model']['architecture'])
+                                            hp_r = m_meta_r.get('hyperparameters', cfg['model']['hyperparameters'])
+                                            model = bm(arch,
+                                                       m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback']),
+                                                       m_meta_r.get('n_features', 1),
+                                                       m_meta_r.get('horizon', cfg['forecasting']['horizon']),
+                                                       hp_r)
+                                            model.load_weights(weights_h5)
+                                            st.toast(f"Model dimuat via Keras 3 ZIP recovery ({arch})")
+                                        else:
+                                            raise ke3_err
                                     from src.model_factory import fix_lambda_tf_refs
                                     fix_lambda_tf_refs(model)
                                     compile_model(model, cfg['model']['hyperparameters']['learning_rate'])
@@ -3625,9 +3653,34 @@ with tab_compare:
                                                     shutil.copy(model_path, h5_path)
                                                 model_path = h5_path
                                             try:
-                                                model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
-                                            except TypeError:
-                                                model = tf.keras.models.load_model(model_path, compile=False)
+                                                try:
+                                                    model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                                                except TypeError:
+                                                    model = tf.keras.models.load_model(model_path, compile=False)
+                                            except OSError as ke3_err:
+                                                if model_path.endswith('.keras') and zipfile.is_zipfile(model_path):
+                                                    extract_dir = os.path.join(model_root, '_extracted_k3')
+                                                    os.makedirs(extract_dir, exist_ok=True)
+                                                    with zipfile.ZipFile(model_path, 'r') as zf:
+                                                        zf.extractall(extract_dir)
+                                                    weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                                                    m_meta_r = {}
+                                                    mp = os.path.join(model_root, 'meta.json')
+                                                    if os.path.exists(mp):
+                                                        try:
+                                                            with open(mp, 'r', encoding='utf-8') as ff: m_meta_r = json.load(ff)
+                                                        except: pass
+                                                    from src.model_factory import build_model as bm
+                                                    arch = m_meta_r.get('architecture', cfg['model']['architecture'])
+                                                    hp_r = m_meta_r.get('hyperparameters', cfg['model']['hyperparameters'])
+                                                    model = bm(arch,
+                                                               m_meta_r.get('lookback', cfg['model']['hyperparameters']['lookback']),
+                                                               m_meta_r.get('n_features', 1),
+                                                               m_meta_r.get('horizon', cfg['forecasting']['horizon']),
+                                                               hp_r)
+                                                    model.load_weights(weights_h5)
+                                                else:
+                                                    raise ke3_err
                                             from src.model_factory import fix_lambda_tf_refs
                                             fix_lambda_tf_refs(model)
                                             compile_model(model, cfg['model']['hyperparameters']['learning_rate'])

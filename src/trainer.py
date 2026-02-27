@@ -672,21 +672,52 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
         except TypeError:
             model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects())
     except Exception as e1:
-        print(f"   [WARN] Failed to load {model_file}: {e1}")
-        # Fallback: try the other format
-        alt_file = model_file.replace('.keras', '.h5') if model_file.endswith('.keras') else model_file.replace('.h5', '.keras')
-        if os.path.exists(alt_file):
-            print(f"   Trying alternative: {alt_file}")
-            try:
-                model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
-            except TypeError:
-                model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects())
+        err_str = str(e1).lower()
+        # Keras 3 ZIP format on TF 2.x
+        if ("signature not found" in err_str or "unable to synchronously open" in err_str) and model_file.endswith('.keras'):
+            import zipfile
+            if zipfile.is_zipfile(model_file):
+                print(f"   [RECOVER] Keras 3 ZIP format detected. Extracting and rebuilding...")
+                import json as _json
+                model_root = os.path.dirname(model_file)
+                extract_dir = os.path.join(model_root, '_extracted_k3')
+                os.makedirs(extract_dir, exist_ok=True)
+                with zipfile.ZipFile(model_file, 'r') as zf:
+                    zf.extractall(extract_dir)
+                weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                
+                m_meta = {}
+                meta_path = os.path.join(model_root, 'meta.json')
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
+                    except: pass
+                from src.model_factory import build_model, compile_model
+                arch = m_meta.get('architecture', cfg['model']['architecture'])
+                hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                model = build_model(arch,
+                                    m_meta.get('lookback', cfg['model']['hyperparameters']['lookback']),
+                                    m_meta.get('n_features', 1),
+                                    m_meta.get('horizon', cfg['forecasting']['horizon']),
+                                    hp)
+                model.load_weights(weights_h5)
+                print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded.")
+            else:
+                raise e1
         else:
-            # Last resort: try compile=False
-            try:
-                model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
-            except TypeError:
-                model = tf.keras.models.load_model(model_file, compile=False)
+            print(f"   [WARN] Failed to load {model_file}: {e1}")
+            alt_file = model_file.replace('.keras', '.h5') if model_file.endswith('.keras') else model_file.replace('.h5', '.keras')
+            if os.path.exists(alt_file):
+                print(f"   Trying alternative: {alt_file}")
+                try:
+                    model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
+                except TypeError:
+                    model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects())
+            else:
+                try:
+                    model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
+                except TypeError:
+                    model = tf.keras.models.load_model(model_file, compile=False)
     
     fix_lambda_tf_refs(model)
 

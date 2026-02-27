@@ -512,13 +512,64 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
             model_loaded = True
         except Exception as load_err:
             err_str = str(load_err).lower()
+            
+            # CASE 1: Keras 3 ZIP format on TF 2.x (file IS a zip but h5py can't read it)
+            #   OR truly corrupt/cloud-only file
             if "signature not found" in err_str or "unable to synchronously open" in err_str or "invalid argument" in err_str:
-                raise ValueError(f"File model '{os.path.basename(actual_model_path)}' tidak dapat dibaca karena masih tersimpan di cloud (0 bytes lokal). Pastikan status file model pada OneDrive adalah 'Available on this device'. Klik Kanan -> 'Always keep on this device' pada folder '{os.path.basename(model_root)}'.")
+                import zipfile as zf
+                if actual_model_path.endswith('.keras') and zf.is_zipfile(actual_model_path):
+                    # This is a Keras 3 ZIP format — extract and rebuild
+                    print(f"[RECOVER] Keras 3 ZIP format terdeteksi. Mengekstrak dan membangun ulang untuk TF 2.x...")
+                    import tempfile, json as _json
+                    from src.model_factory import build_model, compile_model
+                    
+                    extract_dir = os.path.join(model_root, '_extracted_k3')
+                    os.makedirs(extract_dir, exist_ok=True)
+                    with zf.ZipFile(actual_model_path, 'r') as z:
+                        z.extractall(extract_dir)
+                    
+                    weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                    
+                    # Read meta.json to reconstruct model
+                    m_meta = {}
+                    meta_path = os.path.join(model_root, 'meta.json')
+                    if os.path.exists(meta_path):
+                        try:
+                            with open(meta_path, 'r', encoding='utf-8') as f: 
+                                m_meta = _json.load(f)
+                        except: pass
+                    
+                    arch = m_meta.get('architecture', cfg['model']['architecture'])
+                    lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                    nf = m_meta.get('n_features', 0)
+                    hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
+                    hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                    
+                    if nf == 0:
+                        raise ValueError(f"Tidak bisa rebuild model: n_features=0 di meta.json. Pastikan meta.json di '{model_root}' memiliki informasi lengkap.")
+                    
+                    model = build_model(arch, lb, nf, hz, hp)
+                    compile_model(model, hp.get('learning_rate', cfg['model']['hyperparameters']['learning_rate']))
+                    
+                    if os.path.exists(weights_h5):
+                        model.load_weights(weights_h5)
+                        print(f"[OK] Model '{arch}' berhasil di-rebuild dan bobot dimuat dari Keras 3 ZIP.")
+                        model_loaded = True
+                    else:
+                        raise ValueError(f"File weights tidak ditemukan setelah ekstraksi: {weights_h5}")
+                else:
+                    # Truly unreadable (cloud-only or corrupt)
+                    raise ValueError(
+                        f"File model '{os.path.basename(actual_model_path)}' tidak dapat dibaca. "
+                        f"Kemungkinan file corrupt atau OneDrive cloud-only. "
+                        f"Coba: Klik Kanan folder '{os.path.basename(model_root)}' -> 'Always keep on this device'."
+                    )
+            
+            # CASE 2: Python version mismatch (marshal error)
             elif "bad marshal data" in err_str or "unknown type code" in err_str:
                 print(f"[RECOVER] Terjadi error marshal (Python version mismatch). Mencoba membangun ulang model...")
                 from src.model_factory import build_model
                 
-                # Coba baca meta.json untuk dapet info architecture dll
                 m_meta = {}
                 meta_path = os.path.join(model_root, 'meta.json')
                 if os.path.exists(meta_path):
@@ -531,19 +582,17 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
                 hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
                 
-                # Build fresh model
                 model = build_model(arch, lb, nf, hz, hp)
                 
-                # Load weights only
                 try:
                     model.load_weights(actual_model_path)
                     print(f"[OK] Model berhasil dibangun ulang dan bobot dimuat (BYPASS MARSHAL).")
                     model_loaded = True
                 except Exception as w_err:
                     print(f"[ERR] Gagal memuat bobot: {w_err}")
-                    raise load_err # Lempar error asli jika gagal
+                    raise load_err
             else:
-                raise load_err # Lempar error asli jika bukan masalah marshal
+                raise load_err
     
     from src.model_factory import fix_lambda_tf_refs
     if model_loaded:
