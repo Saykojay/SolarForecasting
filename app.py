@@ -1091,7 +1091,10 @@ with tab_eval:
                                     import shutil
                                     shutil.copy(model_path, h5_path)
                                 model_path = h5_path
-                            model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                            try:
+                                model = tf.keras.models.load_model(model_path, compile=False, safe_mode=False)
+                            except TypeError:
+                                model = tf.keras.models.load_model(model_path, compile=False)
                             # Re-compile manually with standard Adam
                             from src.model_factory import compile_model, fix_lambda_tf_refs
                             fix_lambda_tf_refs(model)
@@ -2811,12 +2814,20 @@ with tab_eval:
                             except: pass
 
                     st.markdown(f"""
-                    <div style="background-color: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-bottom: 15px;">
+                    <div style="background-color: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-bottom: 5px;">
                         <b>Arch:</b> {m_meta.get('architecture', 'N/A').upper()} | 
                         <b>Data Source:</b> <span style="color: #94a3b8;">{os.path.basename(m_meta.get('data_source', 'N/A'))}</span> <br>
                         <b>Features ({m_meta.get('n_features', '?')}):</b> <span style="color: #cbd5e1; font-size: 0.85em;">{feat_text}</span>
                     </div>
                     """, unsafe_allow_html=True)
+                    
+                    if 'hyperparameters' in m_meta:
+                        with st.expander("⚙️ View Hyperparameters"):
+                            hp = m_meta['hyperparameters']
+                            cols = st.columns(3)
+                            for i, (k, v) in enumerate(hp.items()):
+                                with cols[i % 3]:
+                                    st.markdown(f"**{k}:** `{v}`")
                 
                 if st.button("🔎 Run Evaluation for Selected Model", type="primary", width="stretch", key="btn_eval_tab"):
                     with st.spinner(f"Evaluating model: {model_to_eval}..."):
@@ -3313,6 +3324,30 @@ with tab_transfer:
         model_list = [f for f in os.listdir(model_dir) if f.endswith(('.keras', '.h5', '.json')) or (os.path.isdir(os.path.join(model_dir, f)) and not f.startswith('.'))]
         selected_model = st.selectbox("1. Pilih Model untuk Diuji:", model_list, format_func=lambda x: label_format_with_time(x, model_dir), key="target_model_sel")
         
+        # Model Info Preview in Target Testing
+        m_info_path = os.path.join(model_dir, selected_model, "meta.json")
+        m_meta = {}
+        if os.path.exists(m_info_path):
+            try:
+                with open(m_info_path, 'r', encoding='utf-8') as f:
+                    m_meta = json.load(f)
+                
+                st.markdown(f"""
+                <div style="background-color: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 5px; font-size: 0.9em; margin-bottom: 5px;">
+                    <b>Model Arch:</b> {m_meta.get('architecture', 'N/A').upper()} | 
+                    <b>Original Data:</b> <span style="color: #94a3b8;">{os.path.basename(m_meta.get('data_source', 'N/A'))}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if 'hyperparameters' in m_meta:
+                    with st.expander("⚙️ View Model Hyperparameters"):
+                        hp = m_meta['hyperparameters']
+                        cols = st.columns(3)
+                        for i, (k, v) in enumerate(hp.items()):
+                            with cols[i % 3]:
+                                st.markdown(f"**{k}:** `{v}`")
+            except: pass
+
         st.markdown("---")
         st.markdown("---")
         st.markdown("#### 2. Pilih Data Target (Preprocessed)")

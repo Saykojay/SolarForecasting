@@ -307,7 +307,10 @@ def _load_latest_model(cfg):
     latest = sorted(files)[-1]
     path = os.path.join(model_dir, latest)
     print(f"Loading model: {path}")
-    model = tf.keras.models.load_model(path, custom_objects=get_custom_objects(), safe_mode=False)
+    try:
+        model = tf.keras.models.load_model(path, custom_objects=get_custom_objects(), safe_mode=False)
+    except TypeError:
+        model = tf.keras.models.load_model(path, custom_objects=get_custom_objects())
     from src.model_factory import fix_lambda_tf_refs
     fix_lambda_tf_refs(model)
     return model

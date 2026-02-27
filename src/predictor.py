@@ -505,7 +505,10 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
             
         model_loaded = False
         try:
-            model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+            try:
+                model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+            except TypeError:
+                model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects())
             model_loaded = True
         except Exception as load_err:
             if "bad marshal data" in str(load_err).lower() or "unknown type code" in str(load_err).lower():

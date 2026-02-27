@@ -667,17 +667,26 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     
     # Try loading with fallback
     try:
-        model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), safe_mode=False)
+        try:
+            model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), safe_mode=False)
+        except TypeError:
+            model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects())
     except Exception as e1:
         print(f"   [WARN] Failed to load {model_file}: {e1}")
         # Fallback: try the other format
         alt_file = model_file.replace('.keras', '.h5') if model_file.endswith('.keras') else model_file.replace('.h5', '.keras')
         if os.path.exists(alt_file):
             print(f"   Trying alternative: {alt_file}")
-            model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
+            try:
+                model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
+            except TypeError:
+                model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects())
         else:
             # Last resort: try compile=False
-            model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
+            try:
+                model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
+            except TypeError:
+                model = tf.keras.models.load_model(model_file, compile=False)
     
     fix_lambda_tf_refs(model)
 
