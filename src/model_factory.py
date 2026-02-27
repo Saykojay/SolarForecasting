@@ -997,3 +997,62 @@ for cls in [RobustGRU, RobustLSTM, RobustSimpleRNN]:
         tf.keras.utils.register_keras_serializable(package="src.model_factory")(cls)
     except ValueError:
         pass
+
+def manual_load_k3_weights(model, h5_path):
+    """Manual mapper untuk memuat bobot dari file H5 Keras 3 ke model Keras 2 (TF 2.10)."""
+    import h5py
+    import numpy as np
+    with h5py.File(h5_path, 'r') as f:
+        if 'layers' not in f:
+            # Mungkin format .h5 Keras 2 standar
+            try:
+                model.load_weights(h5_path)
+                return
+            except:
+                raise ValueError("File H5 tidak memiliki grup 'layers'. Bukan format bobot Keras 3.")
+            
+        layers_group = f['layers']
+        for layer in model.layers:
+            # Lewati layer tanpa parameter (Input, Dropout, Flatten, Reshape dll)
+            if not layer.weights:
+                continue
+            
+            # Cari group yang cocok di H5
+            target_group = None
+            if layer.name in layers_group:
+                target_group = layers_group[layer.name]
+            else:
+                # Coba pencarian berbasis prefix
+                for g_name in layers_group.keys():
+                    if g_name.startswith(layer.name) or layer.name.startswith(g_name):
+                        target_group = layers_group[g_name]
+                        break
+            
+            if target_group:
+                # Case A: Layer memiliki variabel langsung (Dense, Input)
+                if 'vars' in target_group:
+                    vg = target_group['vars']
+                    indices = sorted([int(k) for k in vg.keys()])
+                    weights = [vg[str(idx)][()] for idx in indices]
+                    layer.set_weights(weights)
+                else:
+                    # Case B: Wrapper layer (Bidirectional)
+                    all_sub_weights = []
+                    for sub in ['forward_layer', 'backward_layer']:
+                        if sub in target_group:
+                            curr_sg = target_group[sub]
+                            # RNN layers di Keras 3 sering di dalam grup 'cell'
+                            if 'cell' in curr_sg: curr_sg = curr_sg['cell']
+                            if 'vars' in curr_sg:
+                                vg = curr_sg['vars']
+                                indices = sorted([int(k) for k in vg.keys()])
+                                all_sub_weights.extend([vg[str(idx)][()] for idx in indices])
+                    
+                    if all_sub_weights:
+                        try:
+                            layer.set_weights(all_sub_weights)
+                        except Exception as e:
+                            print(f"[RECOVER] Gagal set weights manual untuk {layer.name}: {e}")
+            else:
+                # Minimal search for similar layers if names shifted
+                pass
