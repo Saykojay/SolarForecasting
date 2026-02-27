@@ -511,7 +511,10 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects())
             model_loaded = True
         except Exception as load_err:
-            if "bad marshal data" in str(load_err).lower() or "unknown type code" in str(load_err).lower():
+            err_str = str(load_err).lower()
+            if "signature not found" in err_str or "unable to synchronously open" in err_str or "invalid argument" in err_str:
+                raise ValueError(f"File model '{os.path.basename(actual_model_path)}' tidak dapat dibaca karena masih tersimpan di cloud (0 bytes lokal). Pastikan status file model pada OneDrive adalah 'Available on this device'. Klik Kanan -> 'Always keep on this device' pada folder '{os.path.basename(model_root)}'.")
+            elif "bad marshal data" in err_str or "unknown type code" in err_str:
                 print(f"[RECOVER] Terjadi error marshal (Python version mismatch). Mencoba membangun ulang model...")
                 from src.model_factory import build_model
                 
@@ -520,7 +523,7 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 meta_path = os.path.join(model_root, 'meta.json')
                 if os.path.exists(meta_path):
                     import json
-                    with open(meta_path, 'r') as f: m_meta = json.load(f)
+                    with open(meta_path, 'r', encoding='utf-8') as f: m_meta = json.load(f)
                 
                 arch = m_meta.get('architecture', cfg['model']['architecture'])
                 lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
