@@ -6,6 +6,17 @@ import os
 import sys
 
 # ============================================================
+# NUMPY 2.0+ PICKLE COMPATIBILITY FIX
+# ============================================================
+# Some pickles are saved with NumPy 2.0+ but loaded in older environments.
+# Newer NumPy uses 'numpy._core' while older ones use 'numpy.core'.
+try:
+    import numpy as np
+    if not hasattr(np, '_core'):
+        sys.modules['numpy._core'] = np.core
+except: pass
+
+# ============================================================
 # PYTORCH WINDOWS DLL & INITIALIZATION FIX
 # ============================================================
 if os.name == 'nt':

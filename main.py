@@ -14,6 +14,14 @@ if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
+# NumPy 2.0+ Pickle Compatibility Fix
+try:
+    import numpy as np
+    if not hasattr(np, '_core'):
+        import sys as _sys
+        _sys.modules['numpy._core'] = np.core
+except: pass
+
 # Setup logging
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
