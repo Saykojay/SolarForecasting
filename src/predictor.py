@@ -4,6 +4,7 @@ Berisi: safe_predict, calculate_full_metrics, CSI->Power transform, target testi
 """
 import os
 import json
+import pickle
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -11,23 +12,51 @@ import joblib
 import logging
 import sys
 
-# NumPy 2.0+ Pickle Compatibility Fix
-try:
-    import numpy as np
-    import sys as _sys
-    if not hasattr(np, '_core'):
-        _sys.modules['numpy._core'] = np.core
-        _sys.modules['numpy._core.numeric'] = np.core.numeric
-        _sys.modules['numpy._core.multiarray'] = np.core.multiarray
-        _sys.modules['numpy._core.umath'] = np.core.umath
-        _sys.modules['numpy._core.fromnumeric'] = np.core.fromnumeric
-        _sys.modules['numpy._core.defchararray'] = np.core.defchararray
-        _sys.modules['numpy._core.records'] = np.core.records
-except: pass
-
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# NUMPY CROSS-VERSION PICKLE COMPATIBILITY
+# ============================================================
+# NumPy 2.0+ renamed numpy.core -> numpy._core internally.
+# Pickles saved with NumPy 2.x contain 'numpy._core.xxx' references
+# that fail on NumPy 1.x (and vice versa). This custom unpickler
+# transparently remaps module paths at load time.
+# ============================================================
+# Determine NumPy version ONCE at import time (before any unpickling side effects)
+_NUMPY_MAJOR_VERSION = int(np.__version__.split('.')[0])
+
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Custom unpickler that handles numpy.core <-> numpy._core renames."""
+    def find_class(self, module, name):
+        if _NUMPY_MAJOR_VERSION < 2:
+            # Running NumPy 1.x: remap numpy._core.xxx -> numpy.core.xxx
+            if module.startswith('numpy._core'):
+                module = module.replace('numpy._core', 'numpy.core', 1)
+        else:
+            # Running NumPy 2.x: remap numpy.core.xxx -> numpy._core.xxx
+            if module.startswith('numpy.core'):
+                module = module.replace('numpy.core', 'numpy._core', 1)
+        return super().find_class(module, name)
+
+
+def safe_read_pickle(path):
+    """Read a pickle file with cross-version NumPy compatibility.
+    
+    Uses a custom unpickler to handle numpy.core <-> numpy._core
+    module renames between NumPy 1.x and 2.x.
+    """
+    try:
+        # First try standard pandas read_pickle (fastest)
+        return pd.read_pickle(path)
+    except (ModuleNotFoundError, ImportError) as e:
+        if 'numpy' in str(e):
+            logger.info(f"Standard pickle failed ({e}), using NumPy-compat unpickler for {path}")
+            with open(path, 'rb') as f:
+                return _NumpyCompatUnpickler(f).load()
+        raise
 
 
 # ============================================================
@@ -247,8 +276,8 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         y_scaler = data.get('y_scaler', joblib.load(y_scaler_path))
         
         # Dataframes are usually too big for bundles, so we stick to data_proc_src for these
-        df_train = data.get('df_train', pd.read_pickle(os.path.join(data_proc_src, 'df_train_feats.pkl')))
-        df_test = data.get('df_test', pd.read_pickle(os.path.join(data_proc_src, 'df_test_feats.pkl')))
+        df_train = data.get('df_train', safe_read_pickle(os.path.join(data_proc_src, 'df_train_feats.pkl')))
+        df_test = data.get('df_test', safe_read_pickle(os.path.join(data_proc_src, 'df_test_feats.pkl')))
     except Exception as e:
         if isinstance(e, ValueError): raise e
         raise ValueError(f"Gagal memuat data preprocessing: {e}. Pastikan sudah menjalankan Step 1.")
@@ -634,7 +663,7 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     # 2. Load TARGET data (raw features, UNSCALED)
     import joblib
     try:
-        df_test = pd.read_pickle(os.path.join(target_dir, 'df_test_feats.pkl'))
+        df_test = safe_read_pickle(os.path.join(target_dir, 'df_test_feats.pkl'))
     except Exception as e:
         raise ValueError(f"Gagal memuat df_test_feats.pkl dari {target_dir}. Detail: {e}")
 

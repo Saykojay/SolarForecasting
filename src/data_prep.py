@@ -428,7 +428,14 @@ def create_sequences_with_indices(X, y, timestamps, lookback, horizon=1):
 # ============================================================
 # FULL PREPROCESSING PIPELINE
 # ============================================================
-def run_preprocessing(cfg: dict, version_name: str = None):
+def run_preprocessing(cfg: dict, version_name: str = None, method: str = 'fixed'):
+    """
+    Menjalankan seluruh pipeline preprocessing dan menyimpan hasilnya.
+    
+    method: 
+      - 'fixed': Buat tensor NPY dengan lookback tetap (saat ini).
+      - 'agnostic': Hanya bersihkan data dan buat fitur, lewati pembuatan sequence (Hemat disk/fleksibel).
+    """
     """Menjalankan seluruh pipeline preprocessing dan menyimpan hasilnya."""
     from src.config_loader import get_root_cols, ensure_dirs
     ensure_dirs(cfg)
@@ -492,9 +499,29 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     # 3. Split
     print("=" * 60)
     print("ALGORITHM: SPLIT -> DROPNA -> CREATE FEATURES -> SELECT -> SCALE -> SEQUENCE")
-    train_size = int(split_cfg['train_ratio'] * len(df_clean))
-    df_train_raw = df_clean.iloc[:train_size].copy()
-    df_test_raw = df_clean.iloc[train_size:].copy()
+    
+    split_mode = split_cfg.get('split_mode', 'standard')
+    
+    if split_mode == 'seasonal':
+        test_months = split_cfg.get('test_months', [12]) # Default December
+        print(f"🔄 Mode: Seasonal/Tropical Split (Test Months: {test_months})")
+        
+        # Ensure we have month extracted for filtering
+        m_series = df_clean.index.month
+        
+        df_test_raw = df_clean[m_series.isin(test_months)].copy()
+        df_train_raw = df_clean[~m_series.isin(test_months)].copy()
+        
+        # Validation print
+        print(f"  Train Months: {sorted(df_train_raw.index.month.unique().tolist())}")
+        print(f"  Test Months:  {sorted(df_test_raw.index.month.unique().tolist())}")
+        train_size = len(df_train_raw)
+    else:
+        print(f"🔄 Mode: Standard Temporal Split (Ratio: {split_cfg['train_ratio']})")
+        train_size = int(split_cfg['train_ratio'] * len(df_clean))
+        df_train_raw = df_clean.iloc[:train_size].copy()
+        df_test_raw = df_clean.iloc[train_size:].copy()
+
     print(f"Raw Split: Train={len(df_train_raw)}, Test={len(df_test_raw)}")
 
     # 4. Drop missing
@@ -553,12 +580,23 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     y_test_scaled = y_scaler.transform(df_test_feats[[act_target]]).flatten()
 
 
-    # 8. Create sequences
-    print("\nCreating sequences...")
-    X_train_seq, y_train_seq, train_indices = create_sequences_with_indices(
-        X_train_scaled, y_train_scaled, df_train_feats.index, lookback, forecast_horizon)
-    X_test_seq, y_test_seq, test_indices = create_sequences_with_indices(
-        X_test_scaled, y_test_scaled, df_test_feats.index, lookback, forecast_horizon)
+    # 8. Create sequences (Conditional)
+    if method == 'fixed':
+        print("\nCreating sequences (Fixed Lookback Mode)...")
+        X_train_seq, y_train_seq, train_indices = create_sequences_with_indices(
+            X_train_scaled, y_train_scaled, df_train_feats.index, lookback, forecast_horizon)
+        X_test_seq, y_test_seq, test_indices = create_sequences_with_indices(
+            X_test_scaled, y_test_scaled, df_test_feats.index, lookback, forecast_horizon)
+    else:
+        print("\nSkipping sequence creation (Lookback Agnostic Mode)...")
+        # In agnostic mode, we use the full scaled arrays as single sequences (for export safety)
+        # or just placeholders
+        X_train_seq = X_train_scaled
+        y_train_seq = y_train_scaled
+        X_test_seq = X_test_scaled
+        y_test_seq = y_test_scaled
+        train_indices = np.arange(len(X_train_scaled))
+        test_indices = np.arange(len(X_test_scaled))
 
     print(f"\nFinal Dataset Shapes:")
     # 9. Save artifacts
@@ -591,12 +629,14 @@ def run_preprocessing(cfg: dict, version_name: str = None):
     
     def save_to(target_path):
         os.makedirs(target_path, exist_ok=True)
-        np.save(os.path.join(target_path, 'X_train.npy'), X_train_seq)
-        np.save(os.path.join(target_path, 'y_train.npy'), y_train_seq)
-        np.save(os.path.join(target_path, 'X_test.npy'), X_test_seq)
-        np.save(os.path.join(target_path, 'y_test.npy'), y_test_seq)
-        np.save(os.path.join(target_path, 'train_indices.npy'), train_indices)
-        np.save(os.path.join(target_path, 'test_indices.npy'), test_indices)
+        if method == 'fixed':
+            np.save(os.path.join(target_path, 'X_train.npy'), X_train_seq)
+            np.save(os.path.join(target_path, 'y_train.npy'), y_train_seq)
+            np.save(os.path.join(target_path, 'X_test.npy'), X_test_seq)
+            np.save(os.path.join(target_path, 'y_test.npy'), y_test_seq)
+            np.save(os.path.join(target_path, 'train_indices.npy'), train_indices)
+            np.save(os.path.join(target_path, 'test_indices.npy'), test_indices)
+        
         joblib.dump(X_scaler, os.path.join(target_path, 'X_scaler.pkl'))
         joblib.dump(y_scaler, os.path.join(target_path, 'y_scaler.pkl'))
         df_train_feats.to_pickle(os.path.join(target_path, 'df_train_feats.pkl'))
@@ -619,10 +659,11 @@ def run_preprocessing(cfg: dict, version_name: str = None):
         },
         'selected_features': selected_features,
         'all_features': df_train_feats.columns.tolist(),
-        'n_features': int(X_train_seq.shape[2]),
+        'n_features': len(selected_features),
         'target_col': act_target,
         'use_csi': target_cfg['use_csi'],
-        'lookback': lookback,
+        'lookback_mode': method,
+        'lookback': lookback if method == 'fixed' else None,
         'horizon': forecast_horizon,
         'csv_source': cols['csv_path'],
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -647,7 +688,7 @@ def run_preprocessing(cfg: dict, version_name: str = None):
         'df_train': df_train_feats, 'df_test': df_test_feats,
         'selected_features': selected_features,
         'all_features': df_train_feats.columns.tolist(),
-        'n_features': X_train_seq.shape[2],
+        'n_features': len(selected_features),
         'corr_matrix': corr_matrix,
         'stats': {
             'original_rows': len(df),

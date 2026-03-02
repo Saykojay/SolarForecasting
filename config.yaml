@@ -78,6 +78,8 @@ pv_system:
   temp_coeff: -0.0045
 seed: 42
 splitting:
+  split_mode: standard
+  test_months: [12]
   test_ratio: 0.3
   train_ratio: 0.7
 target:

@@ -635,7 +635,7 @@ def run_tscv(cfg: dict, data: dict = None):
     return metrics_per_fold
 
 
-def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
+def fine_tune_model(cfg, source_model_path, data=None, ft_config=None, extra_callbacks=None):
     """
     Fine-tune an existing model on new data with optional granular configuration.
     ft_config keys:
@@ -745,12 +745,63 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     # 2. Prepare Data
     if data is None:
         proc = cfg['paths']['processed_dir']
-        data = {
-            'X_train': np.load(os.path.join(proc, 'X_train.npy')),
-            'y_train': np.load(os.path.join(proc, 'y_train.npy')),
-            'X_test': np.load(os.path.join(proc, 'X_test.npy')),
-            'y_test': np.load(os.path.join(proc, 'y_test.npy')),
-        }
+        try:
+            data = {
+                'X_train': np.load(os.path.join(proc, 'X_train.npy')),
+                'y_train': np.load(os.path.join(proc, 'y_train.npy')),
+                'X_test': np.load(os.path.join(proc, 'X_test.npy')),
+                'y_test': np.load(os.path.join(proc, 'y_test.npy')),
+            }
+        except FileNotFoundError:
+            print(f"   [.npy] files not found in {proc}. Attempting to load from pickles...")
+            # Fallback for Dynamic/Agnostic Preprocessing (no sequences saved)
+            p_train = os.path.join(proc, 'df_train_feats.pkl')
+            p_test = os.path.join(proc, 'df_test_feats.pkl')
+            p_meta = os.path.join(proc, 'prep_summary.json')
+            
+            if not os.path.exists(p_train) or not os.path.exists(p_test):
+                raise FileNotFoundError(f"Data preprocessed (npy/pkl) tidak ditemukan di {proc}")
+            
+            df_train = pd.read_pickle(p_train)
+            df_test = pd.read_pickle(p_test)
+            
+            # Load metadata for features and target
+            target_col = cfg['data']['target_col']
+            sel_feats = []
+            if os.path.exists(p_meta):
+                try:
+                    with open(p_meta, 'r') as f:
+                        m_data = json.load(f)
+                        sel_feats = m_data.get('selected_features', [])
+                        target_col = m_data.get('target_col', target_col)
+                except: pass
+            
+            if not sel_feats:
+                # Fallback to all columns except target
+                sel_feats = [c for c in df_train.columns if c != target_col]
+            
+            # Load scalers from the same processed dir
+            s_x = joblib.load(os.path.join(proc, 'X_scaler.pkl'))
+            s_y = joblib.load(os.path.join(proc, 'y_scaler.pkl'))
+            
+            # Scale
+            X_tr_s = s_x.transform(df_train[sel_feats].values)
+            y_tr_s = s_y.transform(df_train[target_col].values.reshape(-1, 1)).flatten()
+            X_ts_s = s_x.transform(df_test[sel_feats].values)
+            y_ts_s = s_y.transform(df_test[target_col].values.reshape(-1, 1)).flatten()
+            
+            from src.data_prep import create_sequences_with_indices
+            lookback = model.input_shape[1]
+            horizon = cfg['forecasting']['horizon']
+            
+            print(f"   Sequencing data on-the-fly (lookback={lookback}, horizon={horizon})...")
+            X_train_seq, y_train_seq, _ = create_sequences_with_indices(X_tr_s, y_tr_s, df_train.index, lookback, horizon)
+            X_test_seq, y_test_seq, _ = create_sequences_with_indices(X_ts_s, y_ts_s, df_test.index, lookback, horizon)
+            
+            data = {
+                'X_train': X_train_seq, 'y_train': y_train_seq,
+                'X_test': X_test_seq, 'y_test': y_test_seq
+            }
 
     # Align lookback
     model_lookback = model.input_shape[1]
@@ -774,6 +825,8 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     
     # 4. Train
     callbacks = _get_callbacks(cfg)
+    if extra_callbacks:
+        callbacks.extend(extra_callbacks)
     
     # Training
     t_cfg = cfg['training']
@@ -816,13 +869,18 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None):
     model.save(model_path)
     
     # Save meta
+    # Convert numpy types in history to native Python float for JSON serialization
+    safe_history = {}
+    for k, v in history.history.items():
+        safe_history[k] = [float(x) for x in v]
+        
     meta = {
         'model_id': model_id,
         'base_model': source_model_path,
         'architecture': cfg['model']['architecture'],
         'fine_tuned': True,
         'timestamp': timestamp,
-        'history': history.history
+        'history': safe_history
     }
     with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
         json.dump(meta, f, indent=2)

@@ -14,19 +14,8 @@ if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-# NumPy 2.0+ Pickle Compatibility Fix
-try:
-    import numpy as np
-    import sys as _sys
-    if not hasattr(np, '_core'):
-        _sys.modules['numpy._core'] = np.core
-        _sys.modules['numpy._core.numeric'] = np.core.numeric
-        _sys.modules['numpy._core.multiarray'] = np.core.multiarray
-        _sys.modules['numpy._core.umath'] = np.core.umath
-        _sys.modules['numpy._core.fromnumeric'] = np.core.fromnumeric
-        _sys.modules['numpy._core.defchararray'] = np.core.defchararray
-        _sys.modules['numpy._core.records'] = np.core.records
-except: pass
+# NumPy cross-version pickle compat is handled by predictor.safe_read_pickle()
+
 
 # Setup logging
 os.makedirs('logs', exist_ok=True)

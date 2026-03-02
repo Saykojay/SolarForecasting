@@ -6,22 +6,12 @@ import os
 import sys
 
 # ============================================================
-# NUMPY 2.0+ PICKLE COMPATIBILITY FIX
+# NUMPY CROSS-VERSION PICKLE COMPATIBILITY
 # ============================================================
-# Some pickles are saved with NumPy 2.0+ but loaded in older environments.
-# Newer NumPy uses 'numpy._core' while older ones use 'numpy.core'.
-try:
-    import numpy as np
-    import sys
-    if not hasattr(np, '_core'):
-        sys.modules['numpy._core'] = np.core
-        sys.modules['numpy._core.numeric'] = np.core.numeric
-        sys.modules['numpy._core.multiarray'] = np.core.multiarray
-        sys.modules['numpy._core.umath'] = np.core.umath
-        sys.modules['numpy._core.fromnumeric'] = np.core.fromnumeric
-        sys.modules['numpy._core.defchararray'] = np.core.defchararray
-        sys.modules['numpy._core.records'] = np.core.records
-except: pass
+# Import safe_read_pickle from predictor to handle numpy.core <-> numpy._core
+# renames between NumPy 1.x and 2.x when loading pickle files.
+# This is imported early so it's available throughout the app.
+from src.predictor import safe_read_pickle
 
 # ============================================================
 # PYTORCH WINDOWS DLL & INITIALIZATION FIX
@@ -771,7 +761,7 @@ with tab_prep_features:
                                    cfg['data']['time_col'], 'timestamp_col'}
                     
                     if os.path.exists(feats_pkl_path):
-                        df_feats_sample = pd.read_pickle(feats_pkl_path)
+                        df_feats_sample = safe_read_pickle(feats_pkl_path)
                         all_available = sorted([c for c in df_feats_sample.columns 
                                               if c not in blocked_cols])
                         st.info(f"📋 Memuat {len(all_available)} fitur dari preprocessing terakhir")
@@ -844,10 +834,24 @@ with tab_prep_features:
                                        min_value=0.1, step=0.5, key="p_cap")
                 cfg['pv_system']['nameplate_capacity_kw'] = cap_p
                 
-                train_ratio_p = st.slider("Train Ratio (Prep)", 0.5, 0.95, cfg['splitting']['train_ratio'], 0.05, key="p_split")
-                cfg['splitting']['train_ratio'] = train_ratio_p
-                cfg['splitting']['test_ratio'] = round(1 - train_ratio_p, 2)
-            
+                # Split Mode Selection
+                split_mode_ui = st.radio("Metode Splitting:", ["Standard (Temporal)", "Tropical Seasonal"], 
+                                         index=0 if cfg['splitting'].get('split_mode', 'standard') == 'standard' else 1,
+                                         key="p_split_mode_radio")
+                split_mode = 'seasonal' if "Season" in split_mode_ui else 'standard'
+                cfg['splitting']['split_mode'] = split_mode
+                
+                if split_mode == 'standard':
+                    train_ratio_p = st.slider("Train Ratio (Prep)", 0.5, 0.95, cfg['splitting'].get('train_ratio', 0.8), 0.05, key="p_split")
+                    cfg['splitting']['train_ratio'] = train_ratio_p
+                    cfg['splitting']['test_ratio'] = round(1 - train_ratio_p, 2)
+                else:
+                    month_names = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agt", "Sep", "Okt", "Nov", "Des"]
+                    curr_months = cfg['splitting'].get('test_months', [12]) 
+                    default_m = [month_names[m-1] for m in curr_months if 1 <= m <= 12]
+                    sel_m_names = st.multiselect("Bulan TEST:", month_names, default=default_m, key="p_sel_months")
+                    cfg['splitting']['test_months'] = [month_names.index(m)+1 for m in sel_m_names]
+
             with c_s2:
                 horizon_p = st.number_input("Horizon (jam)", value=cfg['forecasting']['horizon'],
                                            min_value=1, max_value=168, step=1, key="p_hor")
@@ -855,7 +859,7 @@ with tab_prep_features:
                 
                 lookback_p = st.number_input("Lookback (jam)", value=cfg['model']['hyperparameters']['lookback'],
                                              min_value=6, max_value=720, step=6, key="p_lookback",
-                                             help="Jumlah jam sebelumnya yang digunakan model sebagai input. Lebih besar = lebih banyak konteks historis.")
+                                             help="Jumlah jam sebelumnya yang digunakan model sebagai input.")
                 cfg['model']['hyperparameters']['lookback'] = lookback_p
                 
                 scaler_options = ["minmax", "standard"]
@@ -967,9 +971,24 @@ with tab_prep_features:
     with col_prep_l:
         st.markdown('<div class="pipeline-step">', unsafe_allow_html=True)
         st.markdown("**Run Preprocessing Pipeline**")
-        st.caption("Proses ini akan menghasilkan file .npy dan scaler di folder data/processed.")
         v_name_prep = st.text_input("Nama Versi (Opsional)", placeholder="misal: v1_weather_only", key="v_name_prep")
-        run_preprocess = st.button("▶️ Start Preprocessing", type="primary", width="stretch", key="btn_prep_main")
+        
+        # NEW: Lookback Method Selection
+        prep_method_ui = st.radio(
+            "Tipe Preprocessing:",
+            ["Fixed Sequence (Tensor .npy)", "Lookback Agnostic (Tabel Bersih)"],
+            index=0,
+            horizontal=True,
+            help="Fixed: Membuat tensor NPY dengan lookback tetap (wajib untuk training). Agnostic: Hanya membersihkan data dan fitur (untuk eksplorasi data fleksibel)."
+        )
+        prep_method = 'fixed' if "Fixed" in prep_method_ui else 'agnostic'
+        
+        if prep_method == 'fixed':
+            st.caption("Proses ini akan menghasilkan file .npy (tensors) dan scaler di folder data/processed.")
+        else:
+            st.caption("Proses ini hanya akan melakukan data cleaning, feature engineering, dan scaling tanpa memotong sequence. Hemat disk & fleksibel.")
+            
+        run_preprocess = st.button("▶️ Start Preprocessing", type="primary", use_container_width=True, key="btn_prep_main")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col_prep_r:
@@ -992,12 +1011,12 @@ with tab_prep_features:
                 with contextlib.redirect_stdout(stdout_capture):
                     # Pass the custom version name if provided
                     v_name = v_name_prep.strip() if v_name_prep.strip() else None
-                    metadata = run_preprocessing(cfg, version_name=v_name)
+                    metadata = run_preprocessing(cfg, version_name=v_name, method=prep_method)
                 st.session_state.prep_metadata = metadata
                 st.session_state.last_prep_log = stdout_capture.getvalue()
                 st.session_state.pipeline_log.append(
-                    f"[{datetime.now():%H:%M:%S}] Preprocessing selesai. "
-                    f"Train: {metadata['X_train'].shape}"
+                    f"[{datetime.now():%H:%M:%S}] Preprocessing ({prep_method}) selesai. "
+                    f"Features: {metadata['n_features']}"
                 )
                 st.success(f"Preprocessing selesai!")
                 time.sleep(1)
@@ -1431,7 +1450,7 @@ with tab_data:
                 if st.button("📊 Generate Rolling Correlation Chart", type="primary"):
                     with st.spinner("Menghitung rolling correlation sepanjang waktu..."):
                         import numpy as np
-                        df_roll = pd.read_pickle(train_feats_path)
+                        df_roll = safe_read_pickle(train_feats_path)
                         
                         fig_rc = go.Figure()
                         x_axis = np.arange(len(df_roll))
@@ -1488,10 +1507,16 @@ with tab_data:
             
             # Check if X_train is in memory
             if 'X_train' in m and m['X_train'] is not None:
-                seq_sample = m['X_train'][0]
-                df_seq = pd.DataFrame(seq_sample, columns=sel_f)
-                st.dataframe(df_seq.head(10), width='stretch')
-                st.caption(f"Menampilkan 10 timestep pertama dari sequence ke-0 (Tensor Shape: {m['X_train'].shape})")
+                xt = m['X_train']
+                if xt.ndim == 3: # Mode FIXED
+                    seq_sample = xt[0]
+                    df_seq = pd.DataFrame(seq_sample, columns=sel_f)
+                    st.dataframe(df_seq.head(10), width='stretch')
+                    st.caption(f"📺 Menampilkan 10 timestep pertama dari sequence ke-0 (3D Tensor: {xt.shape})")
+                else: # Mode AGNOSTIC (2D)
+                    df_seq = pd.DataFrame(xt[:10], columns=sel_f)
+                    st.dataframe(df_seq, width='stretch')
+                    st.caption(f"📋 Menampilkan 10 baris pertama dari tabel fitur bersih (2D Table: {xt.shape})")
             else:
                 # Offer to load X_train.npy if it exists in the active folder
                 x_train_path = os.path.join(cfg['paths']['processed_dir'], 'X_train.npy')
@@ -2271,7 +2296,7 @@ with tab_baseline:
                         
                         res = evaluate_ml_baseline(b_model, X_train, y_train, X_test, y_test, y_scaler=y_scaler)
                     else:
-                        df_test = pd.read_pickle(os.path.join(active_b_dir, 'df_test_feats.pkl'))
+                        df_test = safe_read_pickle(os.path.join(active_b_dir, 'df_test_feats.pkl'))
                         res = evaluate_physics_baseline(b_model, df_test, capacity_kw=b_capacity)
                     
                     st.success("Evaluasi Selesai!")
@@ -3425,6 +3450,14 @@ with tab_transfer:
             else:
                 selected_target = st.selectbox("Pilih Folder Data Processed:", sorted(processed_folders, reverse=True), key="target_folder_sel")
                 
+                # TSCV Options
+                c_t1, c_t2 = st.columns([1, 1])
+                with c_t1:
+                    use_tscv_eval = st.checkbox("Gunakan Time-Series CV (Evaluation)", value=False, 
+                                               help="Membagi data target menjadi beberapa segmen kronologis untuk mengevaluasi stabilitas model.")
+                with c_t2:
+                    n_folds_eval = st.slider("Jumlah Fold:", 2, 12, 5, disabled=not use_tscv_eval)
+
                 # Container for results
                 if 'target_eval' not in st.session_state:
                     st.session_state.target_eval = None
@@ -3439,12 +3472,13 @@ with tab_transfer:
                             model_path = os.path.join(model_dir, selected_model)
                             target_data_path = os.path.join(processed_root, selected_target)
                             
+                            from src.predictor import test_on_preprocessed_target, calculate_full_metrics
+                            
                             with contextlib.redirect_stdout(stdout_capture):
-                                from src.predictor import test_on_preprocessed_target
                                 result = test_on_preprocessed_target(model_path, target_data_path, cfg)
                             
-                            # Save to session state to persist across reruns (like clicking Fine-tune)
-                            st.session_state.target_eval = {
+                            # Standard results
+                            eval_data = {
                                 'metrics': result['metrics'],
                                 'inference_time': result['inference_time'],
                                 'timestamps': result['timestamps'],
@@ -3454,8 +3488,42 @@ with tab_transfer:
                                 'output': stdout_capture.getvalue(),
                                 'target_folder': selected_target,
                                 'model_id': selected_model,
-                                'timestamp': datetime.now().strftime("%H:%M:%S")
+                                'timestamp': datetime.now().strftime("%H:%M:%S"),
+                                'use_tscv': use_tscv_eval
                             }
+
+                            # TSCV Logic: Segment-based evaluation
+                            if use_tscv_eval:
+                                n_total = len(result['actual_full'])
+                                fold_size = n_total // n_folds_eval
+                                fold_results = []
+                                
+                                capacity = cfg['pv_system']['nameplate_capacity_kw']
+                                
+                                for i in range(n_folds_eval):
+                                    start_idx = i * fold_size
+                                    # Last fold takes all remaining
+                                    end_idx = (i + 1) * fold_size if i < n_folds_eval - 1 else n_total
+                                    
+                                    act_fold = result['actual_full'][start_idx:end_idx]
+                                    pred_fold = result['pred_full'][start_idx:end_idx]
+                                    ts_fold = result['timestamps'][start_idx:end_idx]
+                                    
+                                    if len(act_fold) > 0:
+                                        m_fold = calculate_full_metrics(act_fold, pred_fold, None, f"Fold {i+1}", capacity)
+                                        fold_results.append({
+                                            'fold': i + 1,
+                                            'start': ts_fold[0].strftime("%Y-%m-%d") if hasattr(ts_fold[0], 'strftime') else str(ts_fold[0]),
+                                            'end': ts_fold[-1].strftime("%Y-%m-%d") if hasattr(ts_fold[-1], 'strftime') else str(ts_fold[-1]),
+                                            'mae': m_fold['mae'],
+                                            'rmse': m_fold['rmse'],
+                                            'r2': m_fold['r2'],
+                                            'nmae': m_fold['norm_mae'] * 100,
+                                            'nrmse': m_fold['norm_rmse'] * 100
+                                        })
+                                eval_data['fold_results'] = fold_results
+                            
+                            st.session_state.target_eval = eval_data
                             st.rerun()
                         except Exception as e:
                             st.error(f"Inference Error: {e}")
@@ -3467,31 +3535,59 @@ with tab_transfer:
                     
                     st.success(f"Hasil Evaluasi: **{eval_data['model_id']}** pada data **{eval_data['target_folder']}**")
                     
+                    # --- SHOW HYPERPARAMETERS ---
+                    m_eval_info_path = os.path.join(model_dir, eval_data.get('model_id', ''), "meta.json")
+                    if os.path.exists(m_eval_info_path):
+                        try:
+                            with open(m_eval_info_path, 'r', encoding='utf-8') as f:
+                                m_eval_meta = json.load(f)
+                            if 'hyperparameters' in m_eval_meta:
+                                with st.expander("⚙️ View Model Hyperparameters & Config", expanded=False):
+                                    hp = m_eval_meta['hyperparameters']
+                                    st.markdown(f"**Arch:** `{m_eval_meta.get('architecture', 'N/A').upper()}` | **Train Data:** `{os.path.basename(m_eval_meta.get('data_source', 'N/A'))}`")
+                                    st.markdown("---")
+                                    cols = st.columns(3)
+                                    for i, (k, v) in enumerate(hp.items()):
+                                        with cols[i % 3]:
+                                            st.markdown(f"**{k}:** `{v}`")
+                        except Exception:
+                            pass
+
                     m = eval_data['metrics']
-                    col1, col2, col3, col4, col5 = st.columns(5)
-                    col1.metric("MAE", f"{m['mae']:.4f}")
-                    col2.metric("RMSE", f"{m['rmse']:.4f}")
-                    col3.metric("R²", f"{m['r2']:.4f}")
-                    col4.metric("MAPE", f"{m['mape']:.4f}%")
-                    col5.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
+                    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+                    col1.metric("MAE", f"{m.get('mae', 0):.4f}")
+                    col2.metric("RMSE", f"{m.get('rmse', 0):.4f}")
+                    col3.metric("nMAE", f"{m.get('norm_mae', 0):.4f}")
+                    col4.metric("nRMSE", f"{m.get('norm_rmse', 0):.4f}")
+                    col5.metric("R²", f"{m.get('r2', 0):.4f}")
+                    col6.metric("MAPE", f"{m.get('mape', 0):.2f}%")
+                    col7.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
                     
-                    # --- NEW: VISUALIZATION & ANALYSIS ---
+                    # --- VISUALIZATION & ANALYSIS ---
                     st.markdown("#### 📈 Visualisasi & Analisis Forecast")
                     
-                    # Rebuild DataFrame for continuous time-series plotting
-                    # We'll default to looking at T+1 for the primary line chart if flattened view is too complex, 
-                    # but here we'll simplify to show the first step (T+1) by default since horizon is 24h.
-                    step_idx = 0 
-                    selected_step = 1
+                    # Allow selecting forecast step (T+n)
+                    horizon = eval_data.get('horizon', 24)
+                    selected_step = st.slider("Pilih Forecast Step (T+n):", 1, horizon, 1, key="target_eval_step_slider")
+                    step_idx = selected_step - 1
 
                     df_res = pd.DataFrame({
-                        'Timestamp': eval_data['timestamps'],
+                        'Timestamp': pd.to_datetime(eval_data['timestamps']),
                         'Actual_kW': eval_data['actual_full'][:, step_idx],
                         'Predicted_kW': eval_data['pred_full'][:, step_idx],
                         'Error_kW': eval_data['actual_full'][:, step_idx] - eval_data['pred_full'][:, step_idx]
                     })
+                    
+                    # STEP-SPECIFIC METRICS
+                    step_mae = np.mean(np.abs(df_res['Error_kW']))
+                    step_rmse = np.sqrt(np.mean(df_res['Error_kW']**2))
+                    ss_res = np.sum((df_res['Actual_kW'] - df_res['Predicted_kW'])**2)
+                    ss_tot = np.sum((df_res['Actual_kW'] - np.mean(df_res['Actual_kW']))**2)
+                    step_r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                    
+                    st.info(f"💡 **Metrik Performa Spesifik untuk Forecast Jam ke-{selected_step}:** MAE = `{step_mae:.4f}`, RMSE = `{step_rmse:.4f}`, R² = `{step_r2:.4f}`")
 
-                    # --- NEW: DATE RANGE FILTER ---
+                    # --- DATE RANGE FILTER ---
                     min_ts = df_res['Timestamp'].min()
                     max_ts = df_res['Timestamp'].max()
                     
@@ -3504,27 +3600,111 @@ with tab_transfer:
                         key="target_eval_date_filter"
                     )
                     
-                    # Apply date filtering
-                    if isinstance(date_range, tuple) and len(date_range) == 2:
+                    # Apply date filtering - FIXED: More robust comparison and forced layout range
+                    plot_range = None
+                    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
                         start_date, end_date = date_range
-                        df_res = df_res[(df_res['Timestamp'].dt.date >= start_date) & 
-                                        (df_res['Timestamp'].dt.date <= end_date)].copy()
+                        if start_date and end_date:
+                            # Use pandas timestamps for more robust comparison
+                            start_ts = pd.to_datetime(start_date)
+                            end_ts = pd.to_datetime(end_date) + pd.Timedelta(hours=23, minutes=59)
+                            
+                            df_res = df_res[(df_res['Timestamp'] >= start_ts) & 
+                                            (df_res['Timestamp'] <= end_ts)].copy()
+                            plot_range = [start_ts, end_ts]
+                            st.caption(f"🔍 Menampilkan {len(df_res):,} data poin untuk rentang terpilih.")
                     
                     import plotly.graph_objects as go
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Actual_kW'], name=f"Actual (T+{selected_step})", line=dict(color='#1E88E5')))
-                    fig.add_trace(go.Scatter(x=df_res['Timestamp'], y=df_res['Predicted_kW'], name=f"Predicted (T+{selected_step})", line=dict(color='#FFC107', dash='dash')))
+                    import plotly.express as px
                     
-                    fig.update_layout(
-                        title=f"Perbandingan Output PV Jam ke-{selected_step} (kW)",
-                        xaxis_title="Waktu",
-                        yaxis_title="Power (kW)",
-                        height=400,
-                        margin=dict(l=20, r=20, t=40, b=20),
-                        template="plotly_dark",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    tab_list = ["📉 Line Chart (Time Series)", "💠 Scatter Plot (Actual vs Predicted)"]
+                    if eval_data.get('use_tscv'):
+                        tab_list.append("📊 TSCV Report (Stability Analysis)")
+                    
+                    tabs = st.tabs(tab_list)
+                    tab_line = tabs[0]
+                    tab_scatter = tabs[1]
+                    
+                    with tab_line:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=df_res['Timestamp'], y=df_res['Actual_kW'], 
+                            name=f"Actual (T+{selected_step})", 
+                            line=dict(color='#1E88E5', width=1.5),
+                            connectgaps=False
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=df_res['Timestamp'], y=df_res['Predicted_kW'], 
+                            name=f"Predicted (T+{selected_step})", 
+                            line=dict(color='#FFC107', dash='dash', width=1.5),
+                            connectgaps=False
+                        ))
+                        
+                        fig.update_layout(
+                            title=f"Perbandingan Output PV Jam ke-{selected_step} (kW)",
+                            xaxis_title="Waktu",
+                            yaxis_title="Power (kW)",
+                            height=400,
+                            margin=dict(l=20, r=20, t=40, b=20),
+                            template="plotly_dark",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        
+                        # Force range if filter is active
+                        if plot_range:
+                            fig.update_xaxes(range=plot_range)
+                            
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    if eval_data.get('use_tscv'):
+                        tab_tscv = tabs[2]
+                        with tab_tscv:
+                            st.markdown("##### 📈 Time-Series Stability Analysis")
+                            st.caption("Memecah dataset target menjadi beberapa bagian kronologis (folds) untuk melihat stabilitas performa model.")
+                            
+                            df_folds = pd.DataFrame(eval_data['fold_results'])
+                            st.dataframe(df_folds.style.format({
+                                'mae': '{:.4f}', 'rmse': '{:.4f}', 'r2': '{:.4f}', 
+                                'nmae': '{:.2f}%', 'nrmse': '{:.2f}%'
+                            }).background_gradient(subset=['mae', 'rmse', 'nmae', 'nrmse'], cmap='YlOrRd_r'),
+                                         use_container_width=True)
+                            
+                            fig_tscv = go.Figure()
+                            fig_tscv.add_trace(go.Scatter(x=df_folds['fold'], y=df_folds['r2'], name="R² Score", yaxis="y2", line=dict(color='#00E676', width=3)))
+                            fig_tscv.add_trace(go.Bar(x=df_folds['fold'], y=df_folds['mae'], name="MAE (kW)", marker_color='#2979FF', opacity=0.7))
+                            fig_tscv.add_trace(go.Bar(x=df_folds['fold'], y=df_folds['rmse'], name="RMSE (kW)", marker_color='#FF5252', opacity=0.7))
+                            
+                            fig_tscv.update_layout(
+                                title="Stabilitas Performa Model per Fold",
+                                xaxis_title="Nomor Fold",
+                                yaxis=dict(title="Error (kW)"),
+                                yaxis2=dict(title="R² Score", overlaying="y", side="right", range=[0, 1]),
+                                template="plotly_dark", height=400,
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                            )
+                            st.plotly_chart(fig_tscv, use_container_width=True)
+                            st.info(f"💡 **Analisis**: R² tertinggi pada Fold {df_folds.loc[df_folds['r2'].idxmax(), 'fold']} ({df_folds['r2'].max():.4f}).")
+
+                    with tab_scatter:
+                        fig_scatter = px.scatter(
+                            df_res, x='Actual_kW', y='Predicted_kW', 
+                            title=f"Scatter Diagram: Actual vs Predicted (Jam ke-{selected_step})",
+                            color_discrete_sequence=['#FFC107'],
+                            template="plotly_dark",
+                            opacity=0.6,
+                            labels={'Actual_kW': 'Actual Power (kW)', 'Predicted_kW': 'Predicted Power (kW)'}
+                        )
+                        # Add y=x ideal line
+                        if not df_res.empty:
+                            max_val = max(df_res['Actual_kW'].max(), df_res['Predicted_kW'].max())
+                            min_val = min(df_res['Actual_kW'].min(), df_res['Predicted_kW'].min())
+                            fig_scatter.add_shape(
+                                type='line', x0=min_val, y0=min_val, x1=max_val, y1=max_val, 
+                                line=dict(color='white', dash='dash'), name="Ideal (y=x)"
+                            )
+                        
+                        fig_scatter.update_layout(height=400, margin=dict(l=20, r=20, t=40, b=20))
+                        st.plotly_chart(fig_scatter, use_container_width=True)
 
                     # --- NEW: EXPORT ---
                     with st.expander("📥 Export & Data Detail"):
@@ -3571,32 +3751,70 @@ with tab_transfer:
 
                     if st.button("🔥 Start Fine-Tuning on Target Data", 
                                  type="secondary", use_container_width=True, key="run_fine_tune_btn"):
-                        with st.spinner("🚀 Melakukan Fine-tuning..."):
-                            try:
-                                from src.trainer import fine_tune_model
-                                from datetime import datetime
-                                model_path = os.path.join(model_dir, eval_data['model_id'])
-                                
-                                cfg_target = cfg.copy()
-                                cfg_target['paths']['processed_dir'] = os.path.join(processed_root, eval_data['target_folder'])
-                                
-                                # Prepare ft_config
-                                ft_config = {
-                                    'epochs': ft_epochs,
-                                    'learning_rate': ft_lr,
-                                    'freeze_backbone': ft_freeze,
-                                    'trainable_last_n': ft_last_n,
-                                    'custom_name': ft_name
-                                }
-                                
-                                ft_model, ft_history, ft_id = fine_tune_model(cfg_target, model_path, ft_config=ft_config)
-                                
-                                st.success(f"✅ Fine-tuning Berhasil! Model baru: **{ft_id}**")
-                                st.session_state.pipeline_log.append(f"[{datetime.now():%H:%M:%S}] Fine-tuned {eval_data['model_id']} -> {ft_id}")
-                                st.info("💡 Pilih model baru ini di dropdown atas untuk menguji peningkatannya!")
-                                st.balloons()
-                            except Exception as e:
-                                st.error(f"Fine-tuning Error: {e}")
+                        # Progress logging area
+                        progress_container = st.container()
+                        with progress_container:
+                            st.markdown("---")
+                            st.markdown("##### 🚀 Fine-tuning Progress")
+                            ft_progress_bar = st.progress(0, text="Inisialisasi...")
+                            col_f1, col_f2, col_f3 = st.columns(3)
+                            epoch_disp = col_f1.empty()
+                            loss_disp = col_f2.empty()
+                            vloss_disp = col_f3.empty()
+                            log_disp = st.empty()
+
+                        try:
+                            import tensorflow as tf
+                            from src.trainer import fine_tune_model
+                            from datetime import datetime
+                            import time
+
+                            class FTStreamlitCallback(tf.keras.callbacks.Callback):
+                                def __init__(self, total_epochs):
+                                    super().__init__()
+                                    self.total_epochs = total_epochs
+                                    self.logs = []
+                                def on_epoch_end(self, epoch, logs=None):
+                                    logs = logs or {}
+                                    loss = logs.get('loss', 0)
+                                    v_loss = logs.get('val_loss', 0)
+                                    prog = (epoch + 1) / self.total_epochs
+                                    
+                                    ft_progress_bar.progress(prog, text=f"Epoch {epoch+1}/{self.total_epochs}")
+                                    epoch_disp.metric("Epoch", f"{epoch+1}/{self.total_epochs}")
+                                    loss_disp.metric("Loss", f"{loss:.6f}")
+                                    vloss_disp.metric("Val Loss", f"{v_loss:.6f}")
+                                    
+                                    msg = f"[{datetime.now():%H:%M:%S}] Epoch {epoch+1}/{self.total_epochs}: loss={loss:.6f}, val_loss={v_loss:.6f}"
+                                    self.logs.append(msg)
+                                    log_disp.code("\n".join(self.logs[-10:])) # Show last 10 lines
+
+                            model_path = os.path.join(model_dir, eval_data['model_id'])
+                            
+                            cfg_target = cfg.copy()
+                            cfg_target['paths']['processed_dir'] = os.path.join(processed_root, eval_data['target_folder'])
+                            
+                            # Prepare ft_config
+                            ft_config = {
+                                'epochs': ft_epochs,
+                                'learning_rate': ft_lr,
+                                'freeze_backbone': ft_freeze,
+                                'trainable_last_n': ft_last_n,
+                                'custom_name': ft_name
+                            }
+                            
+                            # Start fine-tuning with callback
+                            ft_cb = FTStreamlitCallback(ft_epochs)
+                            ft_model, ft_history, ft_id = fine_tune_model(
+                                cfg_target, model_path, ft_config=ft_config, extra_callbacks=[ft_cb]
+                            )
+                            
+                            st.success(f"✅ Fine-tuning Berhasil! Model baru: **{ft_id}**")
+                            st.session_state.pipeline_log.append(f"[{datetime.now():%H:%M:%S}] Fine-tuned {eval_data['model_id']} -> {ft_id}")
+                            st.info("💡 Pilih model baru ini di dropdown atas untuk menguji peningkatannya!")
+                            st.balloons()
+                        except Exception as e:
+                            st.error(f"Fine-tuning Error: {e}")
 
 
 
