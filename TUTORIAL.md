@@ -1,495 +1,461 @@
-# Tutorial Lengkap: PV Forecasting Modular Pipeline v1
+# Tutorial: Solar PV Forecasting Pipeline
 
-## Daftar Isi
-1. [Persiapan Awal](#1-persiapan-awal)
-2. [Memahami Struktur Folder](#2-memahami-struktur-folder)
-3. [Memahami File Konfigurasi](#3-memahami-file-konfigurasi)
-4. [Menjalankan Pipeline](#4-menjalankan-pipeline)
-5. [Mode Web Dashboard (Streamlit)](#5-mode-web-dashboard-streamlit)
-6. [Mode TUI (Terminal Interaktif)](#6-mode-tui-terminal-interaktif)
-7. [Mode CLI (Command Line)](#7-mode-cli-command-line)
-8. [Mengedit Konfigurasi](#8-mengedit-konfigurasi)
-9. [Mengganti Arsitektur Model](#9-mengganti-arsitektur-model)
-10. [Hyperparameter Tuning (Optuna)](#10-hyperparameter-tuning-optuna)
+## Table of Contents
+1. [Getting Started](#1-getting-started)
+2. [Project Structure](#2-project-structure)
+3. [Configuration Guide](#3-configuration-guide)
+4. [Running the Pipeline](#4-running-the-pipeline)
+5. [Web Dashboard (Streamlit)](#5-web-dashboard-streamlit)
+6. [Terminal Mode (TUI)](#6-terminal-mode-tui)
+7. [Command Line (CLI)](#7-command-line-cli)
+8. [Changing Model Architecture](#8-changing-model-architecture)
+9. [Hyperparameter Tuning (Optuna)](#9-hyperparameter-tuning-optuna)
+10. [Batch Experiments](#10-batch-experiments)
 11. [Time Series Cross-Validation (TSCV)](#11-time-series-cross-validation-tscv)
-12. [Target Domain Testing (Data Indonesia)](#12-target-domain-testing-data-indonesia)
-13. [Fitur-Fitur Terbaru (v1)](#13-fitur-fitur-terbaru-v1)
-14. [Manajemen Versi Data & Model](#14-manajemen-versi-data--model)
-15. [Version Control (Git & GitHub)](#15-version-control-git--github)
+12. [Target Domain Testing](#12-target-domain-testing)
+13. [Model Comparison](#13-model-comparison)
+14. [Data Versioning & Model Management](#14-data-versioning--model-management)
+15. [Key Features](#15-key-features)
 16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
-## 1. Persiapan Awal
+## 1. Getting Started
 
 ### 1.1 Install Dependencies
-Buka **Anaconda Prompt**, lalu jalankan:
 ```bash
-conda activate tf-gpu
-cd "c:\Users\Lenovo\OneDrive\Pretrain GRU\Pre-train model PatchTST\Modular Pipeline v1"
+# Create environment (recommended)
+conda create -n solar python=3.10
+conda activate solar
+
+# Install requirements
 pip install -r requirements.txt
 ```
 
-### 1.2 Letakkan Data CSV
-Pastikan file CSV data PV ada di folder `data/raw/`.
-Contoh: `data/raw/dkasc_with_dc_power_10_5kw.csv`
+> **Note**: For GPU acceleration, install TensorFlow with CUDA support and PyTorch with CUDA:
+> ```bash
+> pip install tensorflow[and-cuda]
+> pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+> ```
 
-### 1.3 Verifikasi Setup
-```bash
-python _verify.py
+### 1.2 Prepare Your Data
+Place your PV system CSV file in `data/raw/`:
 ```
-Jika semua modul menampilkan `[OK]`, pipeline siap digunakan.
+data/raw/your_pv_data.csv
+```
+
+**Required CSV columns** (names are configurable in `config.yaml`):
+| Column | Description | Example |
+|:-------|:-----------|:--------|
+| `timestamp` | Date/time column | `01/01/2024 00:00` |
+| `pv_output_kw` | PV power output (kW) | `5.32` |
+| `ghi_wm2` | Global Horizontal Irradiance (W/m²) | `450.0` |
+| `ambient_temp_c` | Ambient temperature (°C) | `28.5` |
+| `relative_humidity_pct` | Relative humidity (%) | `65.0` |
+| `wind_speed_ms` | Wind speed (m/s) | `3.2` |
+
+### 1.3 Launch the Dashboard
+```bash
+streamlit run app.py
+```
+Dashboard opens at **http://localhost:8501**
+
+**Windows shortcut**: Double-click `launch_dashboard.bat` — auto-detects your Conda environment.
 
 ---
 
-## 2. Memahami Struktur Folder
+## 2. Project Structure
 
 ```
-Modular Pipeline v1/
+├── app.py                    # Web Dashboard (Streamlit) — main interface
+├── main.py                   # CLI / TUI entry point
+├── config.yaml               # Global configuration file
+├── requirements.txt          # Python dependencies
+├── launch_dashboard.bat      # Windows launcher (auto-detect Conda)
 │
-├── config.yaml              <<< PUSAT KENDALI (semua parameter di sini)
-├── main.py                  <<< Controller utama (TUI + CLI)
-├── app.py                   <<< Web Dashboard (Streamlit)
-├── requirements.txt         <<< Daftar library Python
-├── .gitignore               <<< File yang diabaikan Git
-├── .env                     <<< Environment variables (path)
-├── README.md                <<< Ringkasan singkat
-│
-├── src/                     <<< Kode inti (JANGAN diubah kecuali perlu)
-│   ├── config_loader.py     │   Baca/tulis config.yaml
-│   ├── data_prep.py         │   Algorithm 1, Features, Selection, Sequences
-│   ├── model_factory.py     │   PatchTST, GRU (dan model lain di masa depan)
-│   ├── trainer.py           │   Training, Optuna, TSCV, MLflow
-│   └── predictor.py         │   Evaluasi, CSI->Power, Target Testing
+├── src/                      # Core pipeline modules
+│   ├── data_prep.py          # Data cleaning, feature engineering, sequencing
+│   ├── model_factory.py      # All Keras model architectures
+│   ├── model_hf.py           # HuggingFace/PyTorch model wrappers
+│   ├── trainer.py            # Training, Optuna, TSCV, batch experiments
+│   ├── predictor.py          # Evaluation, inverse transforms, target testing
+│   ├── baseline_models.py    # Classical ML & physics-based baselines
+│   ├── config_loader.py      # Configuration management
+│   └── lang.py               # UI label definitions
 │
 ├── data/
-│   ├── raw/                 <<< Taruh CSV data mentah di sini
-│   ├── processed/           <<< Artefak .npy (otomatis dibuat oleh preprocessing)
-│   └── target/              <<< Taruh CSV data Indonesia di sini
+│   ├── raw/                  # Place raw CSV data here
+│   ├── processed/            # Auto-generated preprocessing artifacts
+│   └── target/               # Place cross-domain test data here
 │
-├── models/                  <<< Model tersimpan (.keras / .h5)
+├── models/                   # Saved models with metadata and scalers
+├── configs/presets/           # Feature engineering presets
+├── scripts/                  # Utility scripts (data merging, comparison)
+├── docs/                     # Documentation & tuning strategy guides
 └── logs/
-    ├── session/             <<< Data persistensi (training history, eval results)
-    └── ...                  <<< Log pipeline lainnya
+    └── session/              # Persistent data (training history, eval results)
 ```
 
-**Prinsip utama**: Anda hanya perlu berurusan dengan 2 hal:
-1. `config.yaml` — untuk mengubah parameter
-2. `app.py` (Web Dashboard) atau `main.py` (CLI/TUI) — untuk menjalankan pipeline
+**Key Principle**: You primarily work with two things:
+1. `config.yaml` — to change parameters
+2. `app.py` (Dashboard) or `main.py` (CLI) — to run the pipeline
 
 ---
 
-## 3. Memahami File Konfigurasi
+## 3. Configuration Guide
 
-File `config.yaml` adalah **satu-satunya tempat** untuk mengubah perilaku pipeline.
-Berikut bagian-bagian pentingnya:
+All pipeline behavior is controlled through `config.yaml`.
 
-### 3.1 Data
+### 3.1 Data Source
 ```yaml
 data:
-  csv_path: "data/raw/dkasc_with_dc_power_10_5kw.csv"   # Path ke file CSV
-  csv_separator: ";"                                       # Pemisah kolom
-  target_col: "pv_output_kw"                               # Kolom target
+  csv_path: "data/raw/your_pv_data.csv"
+  csv_separator: ";"
+  target_col: "pv_output_kw"
+  time_col: "timestamp"
+  time_format: '%d/%m/%Y %H:%M'
+  ghi_col: "ghi_wm2"
 ```
 
-### 3.2 Sistem PV
+### 3.2 PV System Parameters
 ```yaml
 pv_system:
-  nameplate_capacity_kw: 10.5    # Kapasitas panel (kW)
-  temp_coeff: -0.0045            # Koefisien temperatur
+  nameplate_capacity_kw: 10.5   # Panel capacity (kW)
+  temp_coeff: -0.0045           # Temperature coefficient
+  system_efficiency: 0.86       # System efficiency
 ```
 
-### 3.3 Splitting Data
+### 3.3 Data Splitting
 ```yaml
 splitting:
-  train_ratio: 0.9               # 90% training
-  test_ratio: 0.1                # 10% testing
+  split_mode: "standard"        # "standard" or "seasonal"
+  train_ratio: 0.8              # 80% training
+  test_ratio: 0.2               # 20% testing
 ```
 
-### 3.4 Model
+### 3.4 Model Architecture & Hyperparameters
 ```yaml
 model:
-  architecture: "patchtst"       # Pilihan: "patchtst" atau "gru"
+  architecture: "patchtst"      # See supported architectures below
   hyperparameters:
-    lookback: 96                 # Jendela input (jam)
-    patch_len: 24
-    stride: 12
-    d_model: 32
-    n_heads: 8
-    n_layers: 3
-    dropout: 0.1
-    learning_rate: 0.0002
-    batch_size: 32
+    lookback: 72                # Input window (hours)
+    patch_len: 24               # Patch length (Transformer only)
+    stride: 12                  # Patch stride (Transformer only)
+    d_model: 64                 # Model dimension
+    n_heads: 8                  # Number of attention heads
+    n_layers: 3                 # Number of encoder layers
+    dropout: 0.2                # Dropout rate
+    learning_rate: 0.001        # Learning rate
+    batch_size: 32              # Batch size
+    loss_fn: "huber"            # Loss function (mse, mae, huber)
 ```
 
-### 3.5 Fitur yang Aktif
+**Supported architectures:**
+`patchtst`, `patchtst_hf`, `autoformer`, `autoformer_hf`, `timetracker`, `timeperceiver`, `gru`, `lstm`, `rnn`, `causal_transformer_hf`, `linear`, `mlp`
+
+### 3.5 Feature Engineering
 ```yaml
 features:
+  selection_mode: "auto"        # "auto" or "manual"
+  corr_threshold: 0.1           # Minimum correlation with target
+  multicol_threshold: 0.95      # Maximum inter-feature correlation
+  scaler_type: "minmax"         # "minmax" or "standard"
   groups:
-    weather: true     # Fitur cuaca (GHI, Temp, RH, Wind)
-    lags: true        # Fitur lag (1h, 12h, 24h, 48h, 168h)
-    physics: true     # Fitur fisika (clear sky, CSI)
-    rolling: true     # Moving average & std
+    weather: true               # Weather features (GHI, Temp, RH, Wind)
+    lags: true                  # Lag features (1h, 12h, 24h, 48h, 168h)
+    physics: true               # Physics features (Clear Sky, CSI)
+    rolling: true               # Moving average & std deviation
+    time_hour: true             # Cyclical hour encoding (sin/cos)
+    time_month: true            # Cyclical month encoding
+    time_doy: true              # Cyclical day-of-year encoding
 ```
-> Matikan grup fitur dengan mengubah `true` menjadi `false`.
 
 ### 3.6 Preprocessing (Data Cleaning)
 ```yaml
 preprocessing:
-  resample_1h: true            # Resample data ke interval 1 jam
-  remove_outliers: true        # Aktifkan deteksi outlier
-  ghi_high_pv_zero: true       # Hapus data PV=0 saat GHI tinggi (>200 W/m²)
-  ghi_dark_pv_high: true       # Hapus data PV tinggi saat GHI gelap (<threshold)
+  resample_1h: true             # Resample data to 1-hour intervals
+  remove_outliers: true         # Enable outlier detection
+  ghi_high_pv_zero: true        # Remove PV=0 when GHI is bright
+  ghi_dark_pv_high: true        # Remove high PV when GHI is dark
+  fix_ghi_dhi: true             # Fix physical inconsistency (GHI < DHI)
+  clip_precipitation: 100.0     # Cap extreme rainfall values (mm/h)
+  impute_missing_pv: false      # Impute missing PV using CSI correlation
 ```
 
-> **Catatan**: Preprocessing menggunakan **Algorithm 1** yang mencakup:
-> - Penanganan duplikat dan nilai negatif
-> - Deteksi outlier berdasarkan batasan fisik (GHI >2000, Temp <-30, dll)
-> - Deteksi inkonsistensi PV-GHI (PV=0 saat matahari terang)
-> - Deteksi data "frozen" (sensor error - nilai stagnant >10 jam)
+### 3.7 Target Variable
+```yaml
+target:
+  use_csi: true                 # Predict Clear-Sky Index (recommended)
+  csi_ghi_threshold: 50         # GHI threshold for CSI calculation
+  csi_max: 1.2                  # Maximum CSI clipping value
+```
 
-### 3.7 Toggle Tuning & TSCV
+### 3.8 Training Configuration
+```yaml
+training:
+  epochs: 100                   # Maximum training epochs
+  patience: 15                  # Early stopping patience
+  lr_patience: 7                # LR scheduler patience
+  lr_factor: 0.2                # LR reduction factor
+  min_lr: 0.000001              # Minimum learning rate
+
+forecasting:
+  horizon: 24                   # Forecast horizon (hours ahead)
+```
+
+### 3.9 Optuna Tuning & TSCV
 ```yaml
 tuning:
-  enabled: false     # true = jalankan Optuna, false = pakai hyperparameters di atas
-  n_trials: 50
+  enabled: false                # Enable Optuna tuning
+  n_trials: 50                  # Number of trials
+  search_space:
+    d_model: [32, 64, 128, 256]
+    n_layers: [2, 6]
+    dropout: [0.1, 0.3]
+    learning_rate: [0.00005, 0.0005]
+    batch_size: [32]
+    lookback: [72, 336, 24]     # [min, max, step]
 
 tscv:
-  enabled: false     # true = jalankan cross-validation
-  n_splits: 5
+  enabled: false                # Enable Time Series Cross-Validation
+  n_splits: 5                   # Number of CV folds
 ```
 
 ---
 
-## 4. Menjalankan Pipeline
+## 4. Running the Pipeline
 
-Ada **3 cara** menjalankan pipeline:
+There are **3 ways** to run the pipeline:
 
-| Mode | Terminal yang Didukung | Cara |
-|------|----------------------|------|
-| **Web Dashboard** | Semua (akses lewat browser) | `streamlit run app.py` |
-| **TUI** (Menu Interaktif) | Anaconda Prompt, CMD, PowerShell | `python main.py` |
-| **CLI** (Command Line) | Semua terminal termasuk VS Code | `python main.py <perintah>` |
-
-### Penting: Pastikan pakai Python dari env `tf-gpu`
-```bash
-# Cara 1: Aktifkan conda dulu
-conda activate tf-gpu
-python main.py
-
-# Cara 2: Panggil Python langsung (jika conda activate tidak jalan)
-C:\Users\Lenovo\miniconda3\envs\tf-gpu\python.exe main.py
-```
+| Mode | Best For | Command |
+|:-----|:---------|:--------|
+| **Web Dashboard** | Visual workflow, monitoring | `streamlit run app.py` |
+| **TUI** (Interactive menu) | Terminal exploration | `python main.py` |
+| **CLI** (Direct commands) | Automation, scripting | `python main.py <command>` |
 
 ---
 
-## 5. Mode Web Dashboard (Streamlit)
+## 5. Web Dashboard (Streamlit)
 
-> **Cara yang DIREKOMENDASIKAN** — tampilan visual lengkap dengan monitoring real-time.
+> **Recommended** — full visual interface with real-time monitoring.
 
-### 5.1 Cara Menjalankan
-```bash
-conda activate tf-gpu
-cd "c:\Users\Lenovo\OneDrive\Pretrain GRU\Pre-train model PatchTST\Modular Pipeline v1"
-streamlit run app.py
-```
-Atau jika `streamlit` tidak terdeteksi:
-```bash
-C:\Users\Lenovo\miniconda3\envs\tf-gpu\Scripts\streamlit.exe run app.py
-```
+### 5.1 Sidebar Controls
 
-Dashboard akan terbuka di browser: **http://localhost:8501**
+The sidebar contains:
+- **Device Acceleration** — Toggle GPU / CPU
+- **Model Manager** — Select which saved model to use for evaluation
+- **Save Config** — Persist changes to `config.yaml`
+- **Stop All Processes** — Emergency stop for runaway processes
 
-### 5.2 Layout Dashboard
+### 5.2 Dashboard Tabs
 
-Dashboard terdiri dari **Sidebar** (kiri) dan **Area Utama** dengan beberapa tab:
+The dashboard follows a logical ML pipeline workflow:
 
-#### Sidebar - Konfigurasi
-Di sidebar kiri, Anda bisa mengatur:
-- **Model Manager** — Pilih model mana yang aktif untuk evaluasi (lihat Bagian 5.3)
-- **Arsitektur Model** — PatchTST atau GRU
-- **Dataset** — Path CSV dan kapasitas PV
-- **Horizon** — Jumlah jam prediksi ke depan
-- **Data Split** — Rasio train/test
-- **Preprocessing Config** — Toggle cleaning rules (resample, outlier detection)
-- **Hyperparameters** — Lookback, d_model, n_heads, dll
-- **Grup Fitur** — ON/OFF weather, lags, physics, rolling
-- **Opsi Pipeline** — Toggle Optuna tuning dan TSCV
-- **Simpan Konfigurasi** — Menyimpan perubahan ke `config.yaml`
+| # | Tab | Purpose | Key Actions |
+|:-:|:----|:--------|:------------|
+| 1 | **Data Prep & Features** | Data preprocessing | Select dataset, configure features, cleaning rules, run preprocessing |
+| 2 | **Data Insights** | Data verification | View cleaning stats, correlation matrix, rolling correlation analysis, sequence preview |
+| 3 | **Baseline & Physics** | Benchmark models | Run Linear Regression, Random Forest, PVWatts, Single Diode models |
+| 4 | **Training Center** | Model training | Select data version, configure architecture, run training with live loss curves |
+| 5 | **Batch Experiments** | Multi-model queue | Queue experiments with different architectures and hyperparameters, run all automatically |
+| 6 | **Optuna Tuning** | HP optimization | Configure search space, run Bayesian optimization, view trial history |
+| 7 | **Prediction / Eval** | Evaluation | Select model, run evaluation, view metrics (MAE, RMSE, R², MAPE), prediction charts |
+| 8 | **Model Comparison** | Leaderboard | Select multiple models, compare metrics side-by-side, visualize relative performance |
+| 9 | **Target Testing** | Cross-domain test | Load external data, test trained models on different locations |
 
-#### Tab Utama (ML Pipeline Flow)
+### 5.3 Model Manager
 
-Dashboard didesain mengikuti alur kerja *Machine Learning* yang standar:
+Every training run saves a model in the `models/` folder with a unique name (e.g., `patchtst_20260212_1330`).
 
-| Tab | Tujuan | Komponen Utama |
-|-----|--------|----------------|
-| **🧪 Feature Lab** | Perancangan Strategi | Preset Manager, Manual/Auto Feature Selection. |
-| **📥 Preprocessing** | **Pusat Kendali Data** | Pilih Dataset CSV, Atur Feature Groups, Split Ratio, Scaling, Cleaning Rules. |
-| **🔎 Data Insights** | Verifikasi Visual | Metamorfosis Data (Cleaning Stats), Correlation Matrix, Sequence Preview. |
-| **🎯 Tuning** | Optimasi Otomatis | Optuna Hyperparameter Search. |
-| **🧠 Training Center** | Eksekusi Training | **Pilih Versi Data**, Live Loss Curve, Model Registry. |
-| **📈 Evaluation** | Analisis Performa | Metrik komprehensif (MAE, RMSE, R²), Visualisasi Prediksi. |
-| **📦 Target Test** | Real-world Testing | Pemuatan data eksternal (indonesia) ke model terlatih. |
-| **🚀 Runner** | Eksekusi Cepat | Tombol sekali klik untuk Prep, Train, dan Eval. |
-| **📋 Logs** | Monitoring | Log sistem dan riwayat preprocessing terakhir. |
-
-### 5.3 Model Manager (Fitur Baru)
-
-Setiap kali Anda menjalankan training, model akan otomatis disimpan di folder `models/` dengan nama yang unik (contoh: `patchtst_20260212_1330.keras`).
-
-**Model Manager** di sidebar memungkinkan Anda:
-- **Melihat semua model** yang pernah dilatih
-- **Memilih model aktif** untuk evaluasi dan testing
-- Model terbaru otomatis terpilih setelah training selesai
-
-Cara menggunakan:
-1. Lihat dropdown **"Pilih Model untuk Evaluasi"** di sidebar
-2. Pilih model yang diinginkan
-3. Klik **"Run Evaluation"** di tab Runner
-4. Hasil evaluasi akan muncul di tab Evaluation
-
-> **Tips**: Ini sangat berguna untuk **membandingkan** performa antar model.
-> Misalnya, latih PatchTST → evaluasi → ganti arsitektur ke GRU → latih → evaluasi → bandingkan hasilnya.
+The **Model Manager** in the sidebar lets you:
+- View all saved models
+- Switch between models for evaluation
+- The latest model is automatically selected after training
 
 ### 5.4 Live Training Monitor
 
-Saat training berjalan, Anda akan melihat secara real-time:
-- **Progress bar** dengan persentase dan estimasi waktu selesai (ETA)
-- **Metric cards** — Epoch, Train Loss, Val Loss, ETA
-- **Loss curve chart** — Grafik interaktif yang terupdate setiap epoch
-- **Epoch log** — Detail setiap epoch dalam format teks
+During training, you see in real-time:
+- **Progress bar** with percentage and ETA
+- **Loss curve chart** updated every epoch
+- **Metric cards** showing Train Loss, Val Loss
+- **Epoch log** with detailed per-epoch information
 
-### 5.5 Data Insights Tab
+### 5.5 Data Persistence
 
-Tab ini menampilkan hasil preprocessing secara visual:
-- **Statistik** — Jumlah baris asli, setelah cleaning, yang dihapus, dan final sequences
-- **Feature Analysis** — Daftar fitur yang dipilih dan kontribusinya
-- **Correlation Heatmap** — Matriks korelasi antar fitur
-- **Data Preview** — Sample data mentah
+Your data **survives page refreshes**:
 
-### 5.6 Persistensi Data (Refresh-Safe)
-
-Data tracking Anda **TIDAK akan hilang** saat halaman di-refresh. Berikut mekanismenya:
-
-| Data | Tersimpan di | Lokasi File |
-|------|-------------|-------------|
-| Training History (loss curves) | `logs/session/last_training_history.json` | + per-model: `history_{model_name}.json` |
-| Evaluation Metrics (MAE, R², dll) | `logs/session/last_eval_results.json` | |
-| Model Terpilih | `logs/session/selected_model.txt` | |
-| Model File (.keras/.h5) | `models/` | |
-
-**Yang tetap hilang** saat refresh (sifatnya sementara):
-- Live progress bar (real-time, tidak bisa dipersist)
-- Pipeline log (history aktivitas sementara)
-- Prep metadata (detail insight preprocessing — jalankan ulang Step 1 untuk melihat kembali)
+| Data | Storage Location |
+|:-----|:-----------------|
+| Training history (loss curves) | `logs/session/last_training_history.json` |
+| Evaluation metrics | `logs/session/last_eval_results.json` |
+| Selected model | `logs/session/selected_model.txt` |
+| Model files & metadata | `models/` |
 
 ---
 
-## 6. Mode TUI (Terminal Interaktif)
+## 6. Terminal Mode (TUI)
 
-> **Syarat**: Jalankan dari Anaconda Prompt / CMD / PowerShell (bukan terminal VS Code bawaan)
+> Requires Anaconda Prompt, CMD, or PowerShell (not VS Code terminal).
 
-### Langkah:
 ```bash
-conda activate tf-gpu
-cd "c:\Users\Lenovo\OneDrive\Pretrain GRU\Pre-train model PatchTST\Modular Pipeline v1"
 python main.py
 ```
 
-### Tampilan Menu:
+Interactive menu:
 ```
-┌─────────────────────────────────────────┐
-│      PV Forecasting Pipeline            │
-│      Universal Controller v1.0          │
-│      Supports: PatchTST, GRU, and more  │
-└─────────────────────────────────────────┘
-
-┌────────────────┬───────────────────────────────┐
-│ Parameter      │ Nilai                         │
-├────────────────┼───────────────────────────────┤
-│ Arsitektur     │ PATCHTST                      │
-│ Dataset        │ dkasc_with_dc_power_10_5kw.csv│
-│ Kapasitas      │ 10.5 kW                       │
-│ Split          │ 90% / 10%                     │
-│ Lookback       │ 96                            │
-│ Horizon        │ 24 jam                        │
-│ Optuna Tuning  │ OFF                           │
-│ TSCV           │ OFF                           │
-└────────────────┴───────────────────────────────┘
-
-? Apa yang ingin Anda lakukan?
-> 1. Preprocessing (Data > Artefak)
-  2. Training (Latih Model)
+? What would you like to do?
+> 1. Preprocessing (Data → Artifacts)
+  2. Training (Train Model)
   3. Hyperparameter Tuning (Optuna)
   4. TSCV (Cross-Validation)
-  5. Evaluate (Metrik & Analisis)
-  6. Target Testing (Data Indonesia)
-  7. Full Pipeline (Semua Otomatis)
-  8. Edit Konfigurasi
-  9. Keluar
+  5. Evaluate (Metrics & Analysis)
+  6. Target Testing (External Data)
+  7. Full Pipeline (All Automatic)
+  8. Edit Configuration
+  9. Exit
 ```
-
-**Navigasi**: Panah atas/bawah untuk memilih, Enter untuk menjalankan.
 
 ---
 
-## 7. Mode CLI (Command Line)
+## 7. Command Line (CLI)
 
-Cocok untuk terminal VS Code, automasi, atau jika TUI tidak berfungsi.
-
-### Perintah yang Tersedia:
 ```bash
-python main.py preprocess     # Preprocessing data (CSV -> artefak .npy)
-python main.py train          # Training model
-python main.py tune           # Hyperparameter tuning (Optuna)
+python main.py preprocess     # Preprocess CSV → .npy tensors
+python main.py train          # Train model
+python main.py tune           # Run Optuna hyperparameter tuning
 python main.py tscv           # Time Series Cross-Validation
-python main.py evaluate       # Evaluasi model terlatih
-python main.py target         # Testing pada data Indonesia
-python main.py full           # Semua otomatis (Preprocess -> Train -> Evaluate)
+python main.py evaluate       # Evaluate trained model
+python main.py target         # Test on external data
+python main.py full           # Full pipeline (Preprocess → Train → Evaluate)
 ```
 
-### Contoh: Jalankan Full Pipeline
+### Example: Full Pipeline
 ```bash
-C:\Users\Lenovo\miniconda3\envs\tf-gpu\python.exe main.py full
+python main.py full
 ```
 
-Output yang diharapkan:
+Expected output:
 ```
 [1/4] Preprocessing...
   Raw Split: Train=39463, Test=4385
   19 features selected
   Train: (39176, 96, 19), Test: (4266, 96, 19)
-  Semua artefak tersimpan.
 
-[2/4] Tuning dilewati (disabled)
+[2/4] Tuning skipped (disabled)
 
 [3/4] Training...
   Epoch 1/100 - loss: 0.0800 - val_loss: 0.0500
   ...
-  Model disimpan: models/patchtst_20260212_1130.keras
+  Model saved: models/patchtst_20260212_1130
 
 [4/4] Evaluating...
-  TRAIN - MAE=0.25, RMSE=0.45, R2=0.85
-  TEST  - MAE=0.26, RMSE=0.46, R2=0.84
+  TRAIN - MAE=0.25, RMSE=0.45, R²=0.85
+  TEST  - MAE=0.26, RMSE=0.46, R²=0.84
 
-FULL PIPELINE SELESAI!
+FULL PIPELINE COMPLETE!
 ```
 
 ---
 
-## 8. Mengedit Konfigurasi
+## 8. Changing Model Architecture
 
-### Cara 1: Edit file langsung
-Buka `config.yaml` di text editor, ubah nilainya, simpan.
+### Available Architectures
 
-### Cara 2: Lewat Menu TUI
-1. Jalankan `python main.py`
-2. Pilih **"8. Edit Konfigurasi"**
-3. Pilih bagian yang ingin diubah:
+| Architecture | Type | config.yaml value |
+|:-------------|:-----|:------------------|
+| PatchTST (Keras) | Transformer | `patchtst` |
+| PatchTST (HuggingFace) | Transformer/PyTorch | `patchtst_hf` |
+| Autoformer (Keras) | Transformer | `autoformer` |
+| Autoformer (HuggingFace) | Transformer/PyTorch | `autoformer_hf` |
+| Causal Transformer (HF) | Decoder-only/PyTorch | `causal_transformer_hf` |
+| TimeTracker | Transformer + MoE | `timetracker` |
+| TimePerceiver | Latent Bottleneck | `timeperceiver` |
+| GRU | Recurrent | `gru` |
+| LSTM | Recurrent | `lstm` |
+| SimpleRNN | Recurrent | `rnn` |
+| Linear | Baseline | `linear` |
+| MLP | Baseline | `mlp` |
 
-```
-? Bagian mana yang ingin diubah?
-> 1. Arsitektur Model         <- Ganti PatchTST / GRU
-  2. Dataset & Kapasitas      <- Ganti file CSV atau kapasitas kW
-  3. Split Ratio              <- Ubah rasio train/test
-  4. Hyperparameters          <- Ubah lookback, d_model, dll
-  5. Search Space (Tuning)    <- Ubah range pencarian Optuna
-  6. Toggle: Tuning / TSCV    <- ON/OFF Optuna dan TSCV
-  7. Feature Groups           <- ON/OFF grup fitur
-  8. Simpan & Kembali         <- Simpan perubahan ke config.yaml
-```
+### How to Switch
 
-4. Ikuti prompt yang muncul
-5. Pilih **"8. Simpan & Kembali"** untuk menyimpan
-
-### Cara 3: Lewat Web Dashboard
-1. Buka `streamlit run app.py`
-2. Ubah parameter di **Sidebar** (kiri)
-3. Klik **"Simpan Konfigurasi"** di bagian bawah sidebar
-
----
-
-## 9. Mengganti Arsitektur Model
-
-### Contoh: Ganti dari PatchTST ke GRU
-
-**Cara 1 — Edit config.yaml:**
+**Option 1 — Edit `config.yaml`:**
 ```yaml
 model:
-  architecture: "gru"    # ubah dari "patchtst" ke "gru"
+  architecture: "gru"    # Change to desired architecture
 ```
 
-**Cara 2 — Lewat TUI:**
-1. `python main.py` → "8. Edit Konfigurasi" → "1. Arsitektur Model"
-2. Pilih `gru`
-3. "8. Simpan & Kembali"
-4. Kembali ke menu utama, pilih "7. Full Pipeline"
+**Option 2 — Via TUI:**
+`python main.py` → "Edit Configuration" → "Architecture"
 
-**Cara 3 — Lewat Web Dashboard:**
-1. Buka sidebar → ubah dropdown **"Arsitektur Model"** ke `gru`
-2. Klik **"Simpan Konfigurasi"**
-3. Buka tab Runner → klik **"Run Training"**
+**Option 3 — Via Dashboard:**
+Set architecture in the Training Center tab → Save Config
 
-> **Catatan**: Setelah ganti arsitektur, Anda perlu menjalankan ulang  
-> **Training** (atau Full Pipeline). Preprocessing tidak perlu diulang  
-> jika data dan fitur tidak berubah.
+> **Note**: After changing architecture, re-run Training. Preprocessing does not need to be repeated if data and features haven't changed.
 
 ---
 
-## 10. Hyperparameter Tuning (Optuna)
+## 9. Hyperparameter Tuning (Optuna)
 
-### Cara Mengaktifkan:
-
-**Di config.yaml:**
+### Enable Tuning
+In `config.yaml`:
 ```yaml
 tuning:
-  enabled: true        # ubah dari false ke true
-  n_trials: 50         # jumlah percobaan
+  enabled: true
+  n_trials: 50
 ```
 
-**Atau lewat TUI:**
-"8. Edit Konfigurasi" → "6. Toggle: Tuning / TSCV" → "Aktifkan Optuna Tuning? Yes"
+Or via Dashboard: Optuna Tuning tab → configure and run.
 
-**Atau lewat Web Dashboard:**
-Sidebar → "Opsi Pipeline" → centang "Optuna Tuning"
-
-### Cara Menjalankan:
-```bash
-# Khusus tuning saja:
-python main.py tune
-
-# Atau sebagai bagian dari Full Pipeline (jika enabled: true):
-python main.py full
-```
-
-### Rentang Pencarian (Search Space):
-Dapat diubah di config.yaml:
+### Search Space Configuration
 ```yaml
 tuning:
   search_space:
-    patch_len: [12, 24, 4]        # [min, max, step]
-    stride: [4, 12, 4]            # [min, max, step]
-    d_model: [32, 64, 128, 256]   # categorical (pilihan)
-    n_heads: [4, 8, 12]           # categorical
-    n_layers: [2, 6]              # [min, max]
-    dropout: [0.1, 0.3]           # [min, max]
-    learning_rate: [0.00005, 0.0005]  # [min, max] (log scale)
-    batch_size: [32]              # categorical
-    lookback: [72, 336, 24]       # [min, max, step]
+    patch_len: [12, 24, 4]              # [min, max, step]
+    stride: [4, 12, 4]
+    d_model: [32, 64, 128, 256]         # Categorical choices
+    n_heads: [4, 8, 12]
+    n_layers: [2, 6]                    # [min, max] range
+    dropout: [0.1, 0.3]                 # [min, max] float range
+    learning_rate: [0.00005, 0.0005]    # [min, max] log scale
+    batch_size: [32]                    # Fixed value
+    lookback: [72, 336, 24]             # [min, max, step]
 ```
+
+### Run Tuning
+```bash
+python main.py tune
+```
+Or use the Optuna Tuning tab in the dashboard for visual trial monitoring.
+
+---
+
+## 10. Batch Experiments
+
+The **Batch Experiments** tab lets you queue multiple training configurations:
+
+1. Open the **Batch Experiments** tab
+2. Configure each experiment:
+   - Architecture (e.g., PatchTST, GRU, LSTM)
+   - Hyperparameters
+   - Data version
+3. Click **"Add to Queue"**
+4. Repeat for all desired configurations
+5. Click **"Run Batch Now"** to train all models sequentially
+
+Results are collected and can be compared in the **Model Comparison** tab.
 
 ---
 
 ## 11. Time Series Cross-Validation (TSCV)
 
-### Cara Mengaktifkan:
+### Enable TSCV
 ```yaml
 tscv:
   enabled: true
   n_splits: 5
 ```
 
-### Cara Menjalankan:
+### Run TSCV
 ```bash
 python main.py tscv
 ```
@@ -498,7 +464,7 @@ Output:
 ```
 --- Fold 1/5 ---
   Train: 6500, Val: 6500
-  MAE=0.25, RMSE=0.42, R2=0.84
+  MAE=0.25, RMSE=0.42, R²=0.84
 
 --- Fold 2/5 ---
   ...
@@ -506,204 +472,165 @@ Output:
 TSCV SUMMARY
   Avg MAE:  0.26
   Avg RMSE: 0.44
-  Avg R2:   0.83
+  Avg R²:   0.83
 ```
 
 ---
 
-## 12. Target Domain Testing (Data Indonesia)
+## 12. Target Domain Testing
 
-### Langkah:
+Test your trained model on data from a different location or system:
 
-1. **Letakkan file CSV** data Indonesia di folder `data/target/`
-   ```
-   data/target/pv_indonesia_hourly.csv
-   ```
+1. Place the external CSV in `data/target/`
+2. Ensure the CSV has the same column format as training data
+3. In the dashboard, go to **Target Testing** tab
+4. Select the model and target CSV file
+5. Run the test
 
-2. **Pastikan format CSV** sama dengan data training:
-   - Kolom: timestamp, ghi_wm2, dhi_wm2, ambient_temp_c, dll.
-   - Separator: `;` (atau sesuaikan di config.yaml)
-
-3. **Pastikan sudah ada model** yang terlatih di folder `models/`
-
-4. **Jalankan:**
-   ```bash
-   python main.py target
-   ```
-
-5. Sistem akan:
-   - Menampilkan pilihan model (jika ada lebih dari satu)
-   - Menampilkan pilihan file CSV target
-   - Memproses data target menggunakan scaler dari data training
-   - Menampilkan metrik prediksi
+The system will:
+- Apply the same preprocessing and scaling as the training data
+- Generate predictions using the trained model
+- Display performance metrics on the external data
 
 ---
 
-## 13. Fitur-Fitur Terbaru (v1)
+## 13. Model Comparison
 
-### 13.1 Cyclical Time Encoding (Sin/Cos)
-Alih-alih menggunakan angka jam (0-23) atau bulan (1-12) secara linear, sistem ini menggunakan transformasi trigonometri untuk menjaga kontinuitas temporal:
-- **Hourly**: Menghubungkan jam 23:00 kembali ke jam 00:00 dengan mulus.
-- **Monthly**: Menghubungkan Desember ke Januari untuk menangkap siklus musim tahunan.
-- **Seasonal (DOY)**: Menggunakan *Day of Year* (1-365) untuk resolusi tinggi. SHAP analysis membuktikan fitur ini sangat krusial setelah suhu udara.
+Compare multiple trained models side-by-side:
 
-### 13.2 Preprocessing yang Diperkuat (Algorithm 1)
-Preprocessing sekarang mencakup deteksi outlier yang lebih ketat:
-- **Physical Extremes**: GHI > 2000, Temp < -30, RH di luar 0-100%, Wind Speed < 0.
-- **Precipitation Clipping**: Membatasi nilai curah hujan ekstrem yang sering merusak gradien model.
-- **PV Imputation**: Mengisi gap kecil pada data PV menggunakan korelasi berbasis CSI.
+1. Go to **Model Comparison** tab
+2. Select 2+ models from the list
+3. Choose evaluation method:
+   - **Original Dataset** — use each model's training data
+   - **Cross-Domain** — test all models on active target data
+4. Click **"Run Comparison Analysis"**
 
-### 13.3 Data Meta-Insights
-Tab Insights kini menampilkan **"Metamorfosis Data"**:
-- Melihat bagaimana baris data berkurang/bertambah di setiap tahap cleaning.
-- Meninjau korelasi fitur baru (seperti Lag atau CSI) sebelum model dilatih.
+The comparison shows:
+- Leaderboard table (MAE, RMSE, R², MAPE)
+- Bar charts comparing key metrics
+- Overfitting analysis (Train R² vs Test R²)
+- Inference time comparison
 
 ---
 
-## 14. Manajemen Versi Data & Model
+## 14. Data Versioning & Model Management
 
-### 14.1 Pemilihan Versi Preprocessed
-Setiap kali Anda klik **"Start Preprocessing"**, sistem membuat folder baru di `data/processed/` dengan nama `v_MMDD_HHMM_filename`. 
+### Preprocessed Data Versions
+Each preprocessing run creates a uniquely-named folder in `data/processed/` (e.g., `v_0307_1430_dataset`).
 
-**Cara menggunakan versi tertentu untuk training:**
-1. Masuk ke tab **🧠 Training Center**.
-2. Cari expander **"📦 Pilih Versi Data Preprocessed"**.
-3. Pilih versi yang diinginkan (defaultnya adalah "Latest").
-4. Jika versi baru tidak muncul, klik tombol **"🔄 Refresh Daftar Versi"**.
+**To use a specific version for training:**
+1. Open the **Training Center** tab
+2. Expand **"Select Preprocessed Data Version"**
+3. Choose the desired version (default: Latest)
 
-### 14.2 Model Registry
-Model disimpan di folder `models/` lengkap dengan `meta.json` dan `scaler.pkl`. Anda dapat memuat model lama kapan pun melalui Model Manager di sidebar.
+### Model Registry
+Models are saved in `models/` with:
+- Model weights (`.keras` or PyTorch files)
+- `meta.json` — training metadata, hyperparameters, metrics
+- `scaler_X.pkl` / `scaler_y.pkl` — fitted scalers for inference
+
+Switch between models using the **Model Manager** in the sidebar.
 
 ---
 
-## 15. Version Control (Git & GitHub)
+## 15. Key Features
 
-Proyek ini terintegrasi dengan Git untuk melacak setiap perubahan kode Anda.
+### Cyclical Time Encoding (Sin/Cos)
+Instead of using raw numbers (hour 0-23, month 1-12), the pipeline uses trigonometric transformations:
+- **Hourly**: Connects hour 23 back to hour 0 smoothly
+- **Monthly**: Connects December to January for annual cycle capture
+- **Day of Year**: High-resolution 1-365 seasonal encoding
 
-### 15.1 Workflow Harian (Push Perubahan)
-Jika Anda mengubah file (misal menambahkan model baru atau mengubah `data_prep.py`):
-1. Buka **Anaconda Prompt**.
-2. `cd` ke folder proyek.
-3. `git add .` (tambahkan semua perubahan).
-4. `git commit -m "update: menambahkan fitur X"` (simpan progres dengan catatan).
-5. `git push` (unggah ke GitHub).
+### Physics-Based Preprocessing (Algorithm 1)
+- Physical extreme detection (GHI > 2000, Temp < -30, etc.)
+- PV-GHI inconsistency detection (PV=0 when sun is bright)
+- Frozen sensor detection (stagnant readings > 10 hours)
+- Precipitation clipping for extreme rainfall values
+- Optional PV imputation using CSI-based correlation
 
-### 15.2 Menarik Update dari GitHub (Pull)
-Jika Anda mengerjakan proyek di komputer lain:
-`git pull origin main`
+### Clear-Sky Index (CSI) Normalization
+Predicting CSI (radiation ratio) instead of raw power (kW) improves model accuracy by removing the daily solar cycle from the prediction task.
 
-### 15.3 Mengapa Menggunakan Git?
-- **Pencadangan**: Kode Anda aman di GitHub jika laptop bermasalah.
-- **Rollback**: Bisa kembali ke versi kode minggu lalu jika ada error besar.
-- **Kolaborasi**: Memungkinkan pengerjaan proyek bersama tim secara rapi.
+### RevIN (Reversible Instance Normalization)
+Applied in Transformer and optionally in RNN models to normalize input distributions per-instance, improving generalization across different weather patterns.
 
 ---
 
 ## 16. Troubleshooting
 
-### Error: `No module named 'tensorflow'`
-**Penyebab**: Python yang dipakai bukan dari env `tf-gpu`.  
-**Solusi**: Gunakan path Python langsung:
+### `No module named 'tensorflow'`
+**Cause**: Wrong Python environment.
+**Fix**: Activate your conda environment:
 ```bash
-C:\Users\Lenovo\miniconda3\envs\tf-gpu\python.exe main.py
+conda activate solar
 ```
 
-### Error: `NoConsoleScreenBufferError`
-**Penyebab**: Terminal tidak mendukung TUI interaktif (misal: VS Code terminal).  
-**Solusi**: Gunakan mode CLI dengan menambahkan argumen:
+### `NoConsoleScreenBufferError`
+**Cause**: Terminal doesn't support TUI (e.g., VS Code terminal).
+**Fix**: Use CLI mode or the web dashboard:
 ```bash
-python main.py full
-```
-Atau buka **Anaconda Prompt** untuk mode TUI.  
-Atau gunakan **Web Dashboard** (`streamlit run app.py`) yang bekerja di semua terminal.
-
-### Error: `UnicodeEncodeError`
-**Penyebab**: Terminal Windows tidak mendukung karakter Unicode tertentu.  
-**Solusi**: Sudah diperbaiki di versi terbaru. Jika masih muncul, jalankan:
-```bash
-chcp 65001
-python main.py
+python main.py full          # CLI mode
+streamlit run app.py         # Web dashboard
 ```
 
-### Error: `FileNotFoundError: Config file tidak ditemukan`
-**Penyebab**: Menjalankan `python main.py` dari folder yang salah.  
-**Solusi**: Pastikan terminal berada di folder `Modular Pipeline v1`:
+### `FileNotFoundError: Config file not found`
+**Cause**: Running from wrong directory.
+**Fix**: Navigate to the project folder:
 ```bash
-cd "c:\Users\Lenovo\OneDrive\Pretrain GRU\Pre-train model PatchTST\Modular Pipeline v1"
+cd "path/to/Modular Pipeline v1"
 ```
 
-### Error: `unable to synchronize` / `OOM` saat Evaluasi
-**Penyebab**: GPU kehabisan memori karena masih menyimpan sisa training.  
-**Solusi**: Sudah diperbaiki di versi terbaru — evaluasi otomatis membersihkan memori GPU.  
-Jika masih terjadi:
-1. Restart Streamlit (`Ctrl+C` lalu `streamlit run app.py`)
-2. Atau kurangi batch size di config.yaml
-3. Atau jalankan evaluasi terpisah (tidak langsung setelah training)
+### GPU Out of Memory (OOM)
+**Cause**: GPU memory not freed after previous run.
+**Fix**:
+1. Restart Streamlit (`Ctrl+C` then `streamlit run app.py`)
+2. Reduce `batch_size` in config.yaml
+3. Use a smaller `d_model` or fewer `n_layers`
 
-### Error: Shape Mismatch saat Evaluasi
-**Penyebab**: Horizon/lookback di sidebar tidak cocok dengan model yang dimuat.  
-**Solusi**: Sudah diperbaiki — evaluasi sekarang otomatis mendeteksi horizon dan lookback dari arsitektur model. Tidak perlu mengatur manual.
+### Shape Mismatch during Evaluation
+**Cause**: Horizon/lookback settings don't match the loaded model.
+**Fix**: The system auto-detects these from the model's metadata. If issues persist, ensure the correct model is selected in Model Manager.
 
-### Preprocessing lambat / data berkurang drastis
-**Penyebab**: Banyak gap waktu di data → sequence yang valid sedikit.  
-**Solusi**: Pertimbangkan mengubah split ratio di config.yaml:
+### Preprocessing: Data reduced drastically
+**Cause**: Too many temporal gaps in raw data.
+**Fix**: Adjust split ratio or relax cleaning rules:
 ```yaml
 splitting:
-  train_ratio: 0.8    # coba 80/20 atau 90/10
+  train_ratio: 0.8
+preprocessing:
+  remove_outliers: false    # Temporarily disable
 ```
-Atau nonaktifkan beberapa aturan cleaning yang terlalu agresif di sidebar.
 
-### Port 8501 sudah dipakai (Streamlit)
-**Penyebab**: Instance Streamlit sebelumnya masih berjalan.  
-**Solusi**:
+### Port 8501 already in use
+**Cause**: Previous Streamlit instance still running.
+**Fix**:
 ```bash
-# Hentikan semua proses Python
+# Windows: Kill existing processes
 taskkill /F /IM python.exe /T
 
-# Jalankan ulang
+# Then restart
 streamlit run app.py
 ```
 
 ---
 
-## Ringkasan Alur Kerja Harian
+## Daily Workflow (Recommended)
 
-### Menggunakan Web Dashboard (Direkomendasikan):
+### Using the Dashboard:
 ```
-1. Buka Anaconda Prompt
-2. conda activate tf-gpu
-3. cd ke folder "Modular Pipeline v1"
-4. streamlit run app.py
-5. Buka browser: http://localhost:8501
-
-6. Di Dashboard:
-   a. Atur konfigurasi di Sidebar (jika perlu)
-   b. Tab Runner → "Run Preprocessing"
-   c. Tab Runner → "Run Training" (monitor real-time)
-   d. Tab Runner → "Run Evaluation"
-   e. Lihat hasil di tab Training & Evaluation
-
-7. Untuk eksperimen lain:
-   - Ganti arsitektur/hyperparameters di Sidebar
-   - Klik "Simpan Konfigurasi"
-   - Ulangi langkah 6b-6d
-   - Bandingkan model lewat Model Manager
+1. Launch: streamlit run app.py
+2. Configure preprocessing in "Data Prep & Features" tab
+3. Run preprocessing → verify in "Data Insights" tab
+4. Configure model in "Training Center" tab → Start Training
+5. Monitor training progress in real-time
+6. View results in "Prediction / Eval" tab
+7. Compare models in "Model Comparison" tab
 ```
 
-### Menggunakan CLI (Cepat):
+### Using CLI (Quick):
 ```
-1. Buka Anaconda Prompt
-2. conda activate tf-gpu
-3. cd ke folder "Modular Pipeline v1"
-4. python main.py full                # langsung jalan semua
-
-5. Lihat hasil di:
-   - Terminal (metrik langsung ditampilkan)
-   - models/ (file model tersimpan)
-   - logs/  (log detail)
-```
-
-**Untuk eksperimen cepat:**
-```
-Ubah config.yaml → python main.py full → Lihat metrik → Ulangi
+1. Edit config.yaml with desired parameters
+2. Run: python main.py full
+3. View metrics in terminal output
+4. Repeat with different configurations
 ```
