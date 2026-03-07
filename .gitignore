@@ -11,14 +11,18 @@ build/
 .venv/
 venv/
 
-# Data (terlalu besar untuk Git)
-data/raw/
-data/processed/
-data/target/
+# Data (terlalu besar untuk Git, tapi folder dipertahankan)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/target/*
+!data/target/.gitkeep
 data/presets/
 
-# Models (besar)
-models/
+# Models (besar, tapi folder dipertahankan)
+models/*
+!models/.gitkeep
 
 # MLflow
 mlruns/
@@ -36,6 +40,7 @@ Thumbs.db
 
 # Temporary helper scripts
 _*.py
+!__init__.py
 _*.txt
 
 # Per-device local config (conda env name)
