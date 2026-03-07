@@ -56,7 +56,7 @@ model:
 paths:
   logs_dir: logs
   models_dir: models
-  processed_dir: data/processed/v8_vol6
+  processed_dir: data/processed/tes
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
@@ -79,7 +79,8 @@ pv_system:
 seed: 42
 splitting:
   split_mode: standard
-  test_months: [12]
+  test_months:
+  - 12
   test_ratio: 0.3
   train_ratio: 0.7
 target:

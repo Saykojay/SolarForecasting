@@ -112,16 +112,16 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.dropout_rate = dropout
         
         # Paper Footnote 1 suggests BatchNorm instead of LayerNorm
-        self.bn1 = BatchNormalization()
-        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)
-        self.dropout1 = Dropout(dropout)
+        self.bn1 = BatchNormalization(name=f"{self.name}_bn1")
+        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads, name=f"{self.name}_mha")
+        self.dropout1 = Dropout(dropout, name=f"{self.name}_do1")
         
-        self.bn2 = BatchNormalization()
+        self.bn2 = BatchNormalization(name=f"{self.name}_bn2")
         self.ffn = tf.keras.Sequential([
-            Dense(ff_dim, activation='gelu'), # Paper specifies GELU
-            Dense(d_model),
-            Dropout(dropout)
-        ])
+            Dense(ff_dim, activation='gelu', name=f"{self.name}_dense1"), 
+            Dense(d_model, name=f"{self.name}_dense2"),
+            Dropout(dropout, name=f"{self.name}_do_ff")
+        ], name=f"{self.name}_ffn")
 
     def call(self, x, training=False):
         # Transformer architecture according to paper (usually Pre-Norm or specialized for TS)
@@ -176,25 +176,25 @@ class MoELayer(tf.keras.layers.Layer):
         # Shared experts
         self.shared_experts = [
             tf.keras.Sequential([
-                Dense(ff_dim, activation='gelu'),
-                Dense(d_model),
-                Dropout(dropout)
-            ], name=f'shared_expert_{i}') for i in range(n_shared)
+                Dense(ff_dim, activation='gelu', name=f"share_ex{i}_dense1"),
+                Dense(d_model, name=f"share_ex{i}_dense2"),
+                Dropout(dropout, name=f"share_ex{i}_do")
+            ], name=f"{self.name}_shared_expert_{i}") for i in range(n_shared)
         ]
         
         # Private experts
         self.private_experts = [
             tf.keras.Sequential([
-                Dense(ff_dim, activation='gelu'),
-                Dense(d_model),
-                Dropout(dropout)
-            ], name=f'private_expert_{i}') for i in range(n_private)
+                Dense(ff_dim, activation='gelu', name=f"priv_ex{i}_dense1"),
+                Dense(d_model, name=f"priv_ex{i}_dense2"),
+                Dropout(dropout, name=f"priv_ex{i}_do")
+            ], name=f"{self.name}_private_expert_{i}") for i in range(n_private)
         ]
         
         # Router
         if n_private > 0:
-            self.router = Dense(n_private, use_bias=False, name='router')
-            self.b = self.add_weight(name='router_bias', shape=(n_private,), initializer='zeros', trainable=False)
+            self.router = Dense(n_private, use_bias=False, name=f"{self.name}_router")
+            self.b = self.add_weight(name=f"{self.name}_router_bias", shape=(n_private,), initializer='zeros', trainable=False)
 
     def call(self, x, training=False):
         # x shape: (Batch, SeqLen, D)
@@ -273,12 +273,12 @@ class TimeTrackerBlock(tf.keras.layers.Layer):
         self.top_k = top_k
         self.dropout_rate = dropout
         
-        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)
-        self.dropout1 = Dropout(dropout)
-        self.norm1 = RMSNorm()
+        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads, name=f"{self.name}_mha")
+        self.dropout1 = Dropout(dropout, name=f"{self.name}_do1")
+        self.norm1 = RMSNorm(name=f"{self.name}_norm1")
         
-        self.moe = MoELayer(d_model, ff_dim, n_shared, n_private, top_k, dropout)
-        self.norm2 = RMSNorm()
+        self.moe = MoELayer(d_model, ff_dim, n_shared, n_private, top_k, dropout, name=f"{self.name}_moe")
+        self.norm2 = RMSNorm(name=f"{self.name}_norm2")
 
     def call(self, x, training=False):
         # Causal Attention with RMSNorm
@@ -365,15 +365,15 @@ class AutoformerEncoderBlock(tf.keras.layers.Layer):
         self.moving_avg = moving_avg
         self.dropout_rate = dropout
         
-        self.auto_corr = AutoCorrelationMechanism(d_model, c_out)
-        self.decomp1 = SeriesDecomposition(moving_avg)
-        self.decomp2 = SeriesDecomposition(moving_avg)
+        self.auto_corr = AutoCorrelationMechanism(d_model, c_out, name=f"{self.name}_autocorr")
+        self.decomp1 = SeriesDecomposition(moving_avg, name=f"{self.name}_decomp1")
+        self.decomp2 = SeriesDecomposition(moving_avg, name=f"{self.name}_decomp2")
         self.ffn = tf.keras.Sequential([
-            Dense(ff_dim, activation='gelu'),
-            Dense(d_model),
-            Dropout(dropout)
-        ])
-        self.dropout1 = Dropout(dropout)
+            Dense(ff_dim, activation='gelu', name=f"{self.name}_ff_dense1"),
+            Dense(d_model, name=f"{self.name}_ff_dense2"),
+            Dropout(dropout, name=f"{self.name}_ff_do")
+        ], name=f"{self.name}_ffn")
+        self.dropout1 = Dropout(dropout, name=f"{self.name}_do1")
 
     def call(self, x, training=False):
         # Auto-correlation
@@ -404,16 +404,16 @@ class CrossAttentionBlock(tf.keras.layers.Layer):
         self.ff_dim = ff_dim
         self.dropout_rate = dropout
         
-        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads)
-        self.dropout1 = Dropout(dropout)
-        self.bn1 = BatchNormalization()
+        self.mha = MultiHeadAttention(num_heads=n_heads, key_dim=d_model // n_heads, name=f"{self.name}_mha")
+        self.dropout1 = Dropout(dropout, name=f"{self.name}_do1")
+        self.bn1 = BatchNormalization(name=f"{self.name}_bn1")
         
-        self.bn2 = BatchNormalization()
+        self.bn2 = BatchNormalization(name=f"{self.name}_bn2")
         self.ffn = tf.keras.Sequential([
-            Dense(ff_dim, activation='gelu'),
-            Dense(d_model),
-            Dropout(dropout)
-        ])
+            Dense(ff_dim, activation='gelu', name=f"{self.name}_ff_dense1"),
+            Dense(d_model, name=f"{self.name}_ff_dense2"),
+            Dropout(dropout, name=f"{self.name}_ff_do")
+        ], name=f"{self.name}_ffn")
 
     def call(self, inputs, training=False):
         u, z = inputs # u attends to z
@@ -614,8 +614,7 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
     z = Reshape((n_features, lookback, 1))(z)
     # Effectively sharing weights across all channels
     from keras.layers import Lambda
-    z = Lambda(lambda x: tf.reshape(x, [-1, lookback, 1]))(z) 
-
+    z = Lambda(lambda x: tf.reshape(x, [-1, lookback, 1]), name="ci_reshape")(z)
     # 3. Patching & Positioning
     z = PatchEmbedding(patch_len, stride, d_model)(z) # (Batch*M, NumPatches, D)
     num_patches = (lookback - patch_len) // stride + 1
@@ -633,8 +632,7 @@ def build_patchtst(lookback, n_features, forecast_horizon, hp: dict):
     
     # Reshape back to channels: (Batch, M, Horizon)
     from keras.layers import Lambda
-    z = Lambda(lambda x: tf.reshape(x, [-1, n_features, forecast_horizon]))(z)
-    # Permute back to time-last if needed, but RevIN expects (Batch, L, M)
+    z = Lambda(lambda x: tf.reshape(x, [-1, n_features, forecast_horizon]), name="restore_channels")(z)    # Permute back to time-last if needed, but RevIN expects (Batch, L, M)
     z = Permute((2, 1))(z) # (Batch, Horizon, M)
     
     # 6. Denormalization (RevIN)

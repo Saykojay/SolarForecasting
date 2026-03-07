@@ -11,6 +11,7 @@ import tensorflow as tf
 import joblib
 import logging
 import sys
+import copy
 
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
@@ -65,20 +66,77 @@ def safe_read_pickle(path):
 def safe_predict(model, X, batch_size=32):
     """
     Prediksi yang lebih stabil untuk menghindari OOM atau iterator crash.
-    Menghindari penggunaan generator yang sering menyebabkan OUT_OF_RANGE di Keras 3.
+    Menerapkan strategi dynamic batch reduction jika terjadi ResourceExhaustedError.
     """
-    try:
-        # Gunakan predict standar
-        return model.predict(X, batch_size=batch_size, verbose=0)
-    except Exception as e:
-        print(f"[WARN] Standard predict failed: {e}. Using manual batching fallback...")
-        preds = []
-        for i in range(0, len(X), batch_size):
-            batch = X[i : i + batch_size]
-            # Call model directly as a function (faster for small batches)
-            p = model(batch, training=False)
+    import gc
+    
+    # Auto-detect Autoformer or extremely large input/lookback
+    model_name = getattr(model, 'name', 'unknown').lower()
+    is_autoformer = 'autoformer' in model_name or (hasattr(model, 'model') and 'autoformer' in getattr(model.model, 'name', '').lower())
+    
+    # Pre-emptive reduction for memory-heavy architectures
+    if is_autoformer and batch_size > 8:
+        print(f"   [Auto-Scale] Autoformer detected. Reducing batch size {batch_size} -> 8 for VRAM safety.")
+        batch_size = 8
+
+    # Attempt recursive batch reduction strategy
+    current_batch = batch_size
+    while current_batch >= 1:
+        try:
+            # 1. Try standard Keras predict
+            if hasattr(model, 'predict'):
+                # Handle HFModelWrapper which might not like batch_size in its custom predict
+                if model_name == "hf_model_wrapper" or hasattr(model, '_is_hf'):
+                    return model.predict(X, verbose=0)
+                else:
+                    return model.predict(X, batch_size=current_batch, verbose=0)
+            
+            # 2. Try calling model as function (e.g. TF Graph or Layer)
+            return model(X, training=False).numpy()
+            
+        except (tf.errors.ResourceExhaustedError, Exception) as e:
+            err_msg = str(e).lower()
+            is_oom = "oom" in err_msg or "resource exhausted" in err_msg or "allocation" in err_msg
+            
+            if is_oom and current_batch > 1:
+                new_batch = max(1, current_batch // 4)
+                print(f"⚠️ [VRAM OOM] Gagal pada batch {current_batch}. Mencoba kembali dengan batch {new_batch}...")
+                current_batch = new_batch
+                # Force cleanup
+                tf.keras.backend.clear_session()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            
+            # If it's batch=1 and still OOM, try CPU fallback
+            if is_oom and current_batch == 1:
+                print(f"🚨 [VRAM CRITICAL] Batch 1 pun OOM. Mencoba paksa ke CPU...")
+                with tf.device('/CPU:0'):
+                    # We might need to handle the model transfer or just basic np predict
+                    try:
+                        # For Keras, calling with tf.device should work
+                        p = model(X, training=False)
+                        return p.numpy() if hasattr(p, 'numpy') else p
+                    except:
+                        pass
+            
+            # If not OOM or CPU fallback failed, raise the original error or handle manual fallback
+            print(f"[ERROR] Prediksi gagal total: {e}")
+            break
+
+    # Manual line-by-line fallback as last resort (Very slow but guaranteed safety)
+    print("   [Fallback] Menggunakan manual batching (batch=1)...")
+    preds = []
+    for i in range(len(X)):
+        xb = X[i:i+1]
+        try:
+            p = model(xb, training=False)
             preds.append(p.numpy() if hasattr(p, 'numpy') else p)
-        return np.concatenate(preds, axis=0)
+        except:
+            p = model.predict(xb, verbose=0)
+            preds.append(p)
+    return np.concatenate(preds, axis=0)
 
 
 # ============================================================
@@ -157,7 +215,8 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     root_proc = cfg['paths']['processed_dir']
     # If scaler_dir is provided, it means we are using a bundled model
     proc = scaler_dir if scaler_dir else root_proc
-    pv_cfg = cfg['pv_system']
+    pv_cfg = copy.deepcopy(cfg['pv_system'])
+    found_orig_pv = False
     
     # Detect horizon from model instead of relying solely on config
     horizon = model.output_shape[1]
@@ -170,330 +229,217 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     if data is None:
         data = {}
         
-    # --- AUTO-RESOLVE DATA SOURCE ---
-    # If the active data folder has a mismatch, we should try to load from the model's original source
-    data_proc_src = root_proc
+    # --- IDENTIFY TEST DATA AND MODEL ORIGIN ---
+    data_proc_src = root_proc # TEST DATA (Where we evaluate)
+    model_origin_src = proc   # MODEL METADATA (Where we get scalers/features)
+    
     if scaler_dir and os.path.exists(os.path.join(scaler_dir, 'meta.json')):
-        with open(os.path.join(scaler_dir, 'meta.json'), 'r') as f:
-            m_meta = json.load(f)
-            orig_ds = m_meta.get('data_source', '').replace('\\', '/')
-            if orig_ds and os.path.exists(orig_ds):
-                # Check if this original source is different from active root
-                if os.path.abspath(orig_ds) != os.path.abspath(root_proc):
-                    print(f"🔄 Model expects specific data. Switching data source to: {orig_ds}")
-                    data_proc_src = orig_ds
-        
+        try:
+            with open(os.path.join(scaler_dir, 'meta.json'), 'r') as f:
+                m_meta = json.load(f)
+                orig_ds = m_meta.get('data_source', '').replace('\\', '/')
+                if orig_ds:
+                    if os.path.exists(orig_ds): model_origin_src = orig_ds
+                    else:
+                        leaf = os.path.basename(orig_ds.rstrip('\\/'))
+                        if leaf.lower() in ['processed', 'data']:
+                            parts = orig_ds.rstrip('\\/').split('/')
+                            if len(parts) >= 2: leaf = parts[-2]
+                        search_root = os.path.abspath(root_proc)
+                        for _ in range(3): search_root = os.path.dirname(search_root)
+                        for root, _, files in os.walk(search_root):
+                            if os.path.basename(root) == leaf and ('X_train.npy' in files or 'df_train_feats.pkl' in files):
+                                model_origin_src = root.replace('\\', '/')
+                                break
+                if 'pv_system' in m_meta: pv_cfg.update(m_meta['pv_system'])
+        except: pass
+
     try:
-        X_train = data.get('X_train', np.load(os.path.join(data_proc_src, 'X_train.npy')))
-        X_test = data.get('X_test', np.load(os.path.join(data_proc_src, 'X_test.npy')))
-        # Handle Feature Count mismatch (Common when switching Feature Engineering config)
-        expected_n_features = model.input_shape[2]
-        actual_n_features = X_train.shape[2]
-        
-        if expected_n_features != actual_n_features:
-            print(f"⚠️ Feature count mismatch: Model expects {expected_n_features}, Data has {actual_n_features}.")
-            
-            # Try to align if we have the feature list in the model bundle
-            model_feat_path = os.path.join(proc, 'selected_features.json')
-            
-            # If not in bundle, try to find it in the original data_source from meta
-            if not os.path.exists(model_feat_path):
-                meta_path = os.path.join(proc, 'meta.json')
-                if os.path.exists(meta_path):
-                    with open(meta_path, 'r') as f:
-                        m_data = json.load(f)
-                        orig_data_path = m_data.get('data_source', '')
-                        
-                        if orig_data_path:
-                            # 1. Try path in meta directly (normalize slashes)
-                            path_direct = orig_data_path.replace('\\', '/')
-                            candidate = os.path.join(path_direct, 'selected_features.json')
-                            
-                            if os.path.exists(candidate):
-                                model_feat_path = candidate
-                            else:
-                                # 2. Smart Recovery: Search for the leaf folder name in data/processed
-                                # This fixes broken paths caused by nesting or system moves
-                                leaf_name = os.path.basename(orig_data_path.rstrip('\\/'))
-                                if leaf_name:
-                                    print(f"   Searching for original data folder '{leaf_name}' recursively...")
-                                    # root_proc is likely the base 'data/processed' if we are here
-                                    # Let's find the absolute root of data/processed
-                                    search_root = root_proc
-                                    while os.path.basename(search_root).startswith(('v_', 'version_')):
-                                        search_root = os.path.dirname(search_root)
-                                    
-                                    found_path = None
-                                    for root, dirs, files in os.walk(search_root):
-                                        if os.path.basename(root) == leaf_name:
-                                            if 'selected_features.json' in files:
-                                                found_path = os.path.join(root, 'selected_features.json')
-                                                break
-                                    
-                                    if found_path:
-                                        print(f"   Recovery successful! Found feature list at: {found_path}")
-                                        model_feat_path = found_path
+        expected_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else None
+        lookback = model.input_shape[1] if hasattr(model, 'input_shape') else cfg['model']['hyperparameters']['lookback']
+        horizon = model.output_shape[1] if hasattr(model, 'output_shape') else cfg['forecasting']['horizon']
 
-            data_feat_path = os.path.join(data_proc_src, 'selected_features.json')
+        X_train, X_test = None, None
+        train_indices, test_indices = None, None
+        data_reconstructed = False
+        
+        # Helper to get feature lists
+        def _get_ft_list(folder):
+            fp = os.path.join(folder, 'selected_features.json').replace('\\', '/')
+            if os.path.exists(fp):
+                try:
+                    with open(fp, 'r') as _f: return json.load(_f)
+                except: pass
+            pp = os.path.join(folder, 'prep_summary.json').replace('\\', '/')
+            if os.path.exists(pp):
+                try:
+                    with open(pp, 'r') as _f: return json.load(_f).get('selected_features')
+                except: pass
+            return None
+
+        model_feat_list = _get_ft_list(proc)
+        if not model_feat_list: model_feat_list = _get_ft_list(model_origin_src)
+        data_feat_list = _get_ft_list(data_proc_src)
+
+        # Do we need reconstruction?
+        need_reconstruction = False
+        
+        npy_path = os.path.join(data_proc_src, 'X_train.npy').replace('\\', '/')
+        idx_tr_p = os.path.join(data_proc_src, 'train_indices.npy').replace('\\', '/')
+        idx_ts_p = os.path.join(data_proc_src, 'test_indices.npy').replace('\\', '/')
+        
+        if not (os.path.exists(npy_path) and os.path.exists(idx_tr_p) and os.path.exists(idx_ts_p)):
+            need_reconstruction = True
+        else:
+            # Check shape compatibility
+            tmp_X = np.load(npy_path, mmap_mode='r')
+            if tmp_X.shape[1] != lookback:
+                need_reconstruction = True
             
-            if os.path.exists(model_feat_path) and os.path.exists(data_feat_path):
-                with open(model_feat_path, 'r') as f: model_feat_list = json.load(f)
-                with open(data_feat_path, 'r') as f: data_feat_list = json.load(f)
+            # Check feature matching
+            if model_feat_list and data_feat_list and (model_feat_list != data_feat_list):
+                # If feature counts match but order/names differ, NPY is incorrect. Force reconstruction.
+                need_reconstruction = True
+
+        df_train = data.get('df_train')
+        if df_train is None:
+            tr_p = os.path.join(data_proc_src, 'df_train_feats.pkl').replace('\\', '/')
+            df_train = pd.read_pickle(tr_p) if os.path.exists(tr_p) else None
+            
+        df_test = data.get('df_test')
+        if df_test is None:
+            ts_p = os.path.join(data_proc_src, 'df_test_feats.pkl').replace('\\', '/')
+            df_test = pd.read_pickle(ts_p) if os.path.exists(ts_p) else None
+
+        if not need_reconstruction and data.get('X_train') is None:
+            # Use pre-saved NPY
+            X_train = np.load(npy_path)
+            X_test = np.load(os.path.join(data_proc_src, 'X_test.npy').replace('\\', '/'))
+            train_indices = np.load(idx_tr_p)
+            test_indices = np.load(idx_ts_p)
+            print(f"✅ Synced NPY loaded: {data_proc_src}")
+        elif data.get('X_train') is None:
+            # Reconstruct from PKL
+            print(f"🚀 Syncing: Reconstructing sequences from .pkl in {data_proc_src}...")
+            sc_path = os.path.join(proc, 'X_scaler.pkl').replace('\\', '/')
+            if not os.path.exists(sc_path): sc_path = os.path.join(model_origin_src, 'X_scaler.pkl').replace('\\', '/')
+            
+            if df_train is not None and df_test is not None and os.path.exists(sc_path):
+                x_scaler = joblib.load(sc_path)
                 
-                # If all model features exist in the current data, we can slice
-                if all(f in data_feat_list for f in model_feat_list):
-                    print(f"   Aligning data: Extracting the {expected_n_features} features used during training...")
-                    indices = [data_feat_list.index(f) for f in model_feat_list]
-                    X_train = X_train[:, :, indices]
-                    X_test = X_test[:, :, indices]
-                else:
-                    missing = [f for f in model_feat_list if f not in data_feat_list]
-                    raise ValueError(f"Inkompatibilitas Fitur: Model ini dilatih menggunakan fitur {missing} "
-                                     f"yang tidak ada dalam data preprocessed saat ini. "
-                                     f"Silakan pilih versi data yang tepat di Training Center.")
-            else:
-                raise ValueError(f"Mismatch Fitur: Model mengharapkan {expected_n_features} fitur, "
-                                 f"tapi data memiliki {actual_n_features}. "
-                                 f"Pastikan Versi Data dan Model yang dipilih sinkron.")
+                ft_list = model_feat_list if model_feat_list else data_feat_list
+                y_c = 'csi_target' if 'csi_target' in df_train.columns else cfg['data']['target_col']
+                
+                if ft_list: 
+                    valid_ft = [f for f in ft_list if f in df_train.columns]
+                    if len(valid_ft) != len(ft_list):
+                        missing = set(ft_list) - set(valid_ft)
+                        raise ValueError(f"Target data ({os.path.basename(data_proc_src)}) lacks features required by model: {missing}")
+                    X_tr_df, X_ts_df = df_train[valid_ft], df_test[valid_ft]
+                else: 
+                    X_tr_df = df_train.select_dtypes(include=[np.number]).drop(columns=[y_c] if y_c in df_train.columns else [])
+                    X_ts_df = df_test.select_dtypes(include=[np.number]).drop(columns=[y_c] if y_c in df_test.columns else [])
+                
+                X_train_scaled, X_test_scaled = x_scaler.transform(X_tr_df), x_scaler.transform(X_ts_df)
+                
+                from src.data_prep import create_sequences_with_indices
+                X_train, _, train_indices = create_sequences_with_indices(X_train_scaled, np.zeros(len(df_train)), df_train.index, lookback, horizon)
+                X_test, _, test_indices = create_sequences_with_indices(X_test_scaled, np.zeros(len(df_test)), df_test.index, lookback, horizon)
+                data_reconstructed = True
+            else: 
+                raise ValueError(f"Missing essential files in {data_proc_src} or {model_origin_src}")
 
-        # Handle lookback mismatch in evaluation
-        actual_data_lookback = X_train.shape[1]
-        if lookback != actual_data_lookback:
-            print(f"⚠️ Evaluation Lookback mismatch: Model wants {lookback}, Data has {actual_data_lookback}.")
-            if lookback < actual_data_lookback:
-                print(f"   Truncating evaluation sequences to last {lookback} steps...")
-                X_train = X_train[:, -lookback:, :]
-                X_test = X_test[:, -lookback:, :]
-            else:
-                raise ValueError(f"Data lookback ({actual_data_lookback}) lebih kecil dari "
-                                 f"ekspektasi model ({lookback}). Jalankan ulang Preprocessing Step 1.")
+        if data.get('X_train') is not None:
+            X_train = data['X_train']
+            X_test = data['X_test']
+            train_indices = data.get('train_indices')
+            test_indices = data.get('test_indices')
 
-        # Scaler and Dataframes: If scaler_dir exists, take pkl from there, otherwise from root_proc
-        y_scaler_path = os.path.join(proc, 'y_scaler.pkl')
-        if not os.path.exists(y_scaler_path): # Fallback to root if not in bundle
-            y_scaler_path = os.path.join(root_proc, 'y_scaler.pkl')
-            
-        y_scaler = data.get('y_scaler', joblib.load(y_scaler_path))
-        
-        # Dataframes are usually too big for bundles, so we stick to data_proc_src for these
-        df_train = data.get('df_train', safe_read_pickle(os.path.join(data_proc_src, 'df_train_feats.pkl')))
-        df_test = data.get('df_test', safe_read_pickle(os.path.join(data_proc_src, 'df_test_feats.pkl')))
+        actual_n_features = X_train.shape[2]
+        if expected_n_features and expected_n_features != actual_n_features:
+            raise ValueError(f"Feature count mismatch: Model expects {expected_n_features}, Data has {actual_n_features}.")
+
+        # Label/Inverse Scaler MUST come from origin
+        y_sc_p = os.path.join(proc, 'y_scaler.pkl').replace('\\', '/')
+        if not os.path.exists(y_sc_p): y_sc_p = os.path.join(model_origin_src, 'y_scaler.pkl').replace('\\', '/')
+        y_scaler = data.get('y_scaler', joblib.load(y_sc_p))
     except Exception as e:
         if isinstance(e, ValueError): raise e
         raise ValueError(f"Gagal memuat data preprocessing: {e}. Pastikan sudah menjalankan Step 1.")
 
-    # Predict
-    print("Generating predictions...")
-    y_train_pred_scaled = safe_predict(model, X_train)
-    y_test_pred_scaled = safe_predict(model, X_test)
-
-    # Actual values
-    target_col = cfg['data']['target_col']
+    # --- INFERENCE ---
+    import time
     
-    # Check if we should use CSI to Power conversion
-    # We look at the prep_summary.json in the bundle (proc) first
-    use_csi_conversion = True
-    summary_path = os.path.join(proc, 'prep_summary.json')
-    if not os.path.exists(summary_path): 
-        summary_path = os.path.join(data_proc_src, 'prep_summary.json')
-        
-    if os.path.exists(summary_path):
-        with open(summary_path, 'r') as f:
-            summary = json.load(f)
-            train_target = summary.get('target_col', 'csi_target')
-            if train_target != 'csi_target':
-                use_csi_conversion = False
-                print("💡 Model detected as Absolute Power model (No CSI). Skipping conversion.")
+    start_time = time.time()
+    y_ts_s = safe_predict(model, X_test)
+    end_time = time.time()
+    inf_time_ms = ((end_time - start_time) / max(1, len(X_test))) * 1000
+    
+    y_tr_s = safe_predict(model, X_train)
+    
+    y_tr_r = y_scaler.inverse_transform(y_tr_s.reshape(-1, 1)).reshape(y_tr_s.shape)
+    y_ts_r = y_scaler.inverse_transform(y_ts_s.reshape(-1, 1)).reshape(y_ts_s.shape)
 
-    # Inverse transform
-    y_train_pred_raw = y_scaler.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).reshape(y_train_pred_scaled.shape)
-    y_test_pred_raw = y_scaler.inverse_transform(y_test_pred_scaled.reshape(-1, 1)).reshape(y_test_pred_scaled.shape)
-
+    # --- CONVERSION ---
     steps = np.arange(horizon)
-    if use_csi_conversion:
-        print("Converting CSI to Power...")
-        # Recreate indices for this evaluation based on ACTUAL model shapes
-        _, _, train_idx_local = create_sequences_with_indices(
-            np.zeros((len(df_train), 1)), np.zeros(len(df_train)),
-            df_train.index, lookback, horizon)
-        _, _, test_idx_local = create_sequences_with_indices(
-            np.zeros((len(df_test), 1)), np.zeros(len(df_test)),
-            df_test.index, lookback, horizon)
+    use_csi = True
+    sum_p = os.path.join(proc, 'prep_summary.json')
+    if not os.path.exists(sum_p): sum_p = os.path.join(data_proc_src, 'prep_summary.json')
+    if os.path.exists(sum_p):
+        with open(sum_p, 'r') as f:
+            if json.load(f).get('target_col') != 'csi_target': use_csi = False
 
-        # Align
-        n_train = min(len(train_idx_local), len(y_train_pred_raw))
-        n_test = min(len(test_idx_local), len(y_test_pred_raw))
-        train_idx_local = train_idx_local[:n_train]
-        test_idx_local = test_idx_local[:n_test]
-        y_train_pred_raw = y_train_pred_raw[:n_train]
-        y_test_pred_raw = y_test_pred_raw[:n_test]
-
-        # Clear sky values at prediction points
-        pv_cs_train = df_train['pv_clear_sky'].values[train_idx_local[:, np.newaxis] + steps]
-        pv_cs_test = df_test['pv_clear_sky'].values[test_idx_local[:, np.newaxis] + steps]
-
-        # CSI -> Power
-        if len(y_train_pred_raw.shape) == 3 and y_train_pred_raw.shape[2] == 1:
-            pv_train_pred = np.clip(y_train_pred_raw[:, :, 0] * pv_cs_train, 0, pv_cfg['nameplate_capacity_kw'])
-            pv_test_pred = np.clip(y_test_pred_raw[:, :, 0] * pv_cs_test, 0, pv_cfg['nameplate_capacity_kw'])
-        else:
-            pv_train_pred = np.clip(y_train_pred_raw * pv_cs_train, 0, pv_cfg['nameplate_capacity_kw'])
-            pv_test_pred = np.clip(y_test_pred_raw * pv_cs_test, 0, pv_cfg['nameplate_capacity_kw'])
-    else:
-        # Already power
-        if len(y_train_pred_raw.shape) == 3 and y_train_pred_raw.shape[2] == 1:
-            pv_train_pred = np.clip(y_train_pred_raw[:, :, 0], 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
-            pv_test_pred = np.clip(y_test_pred_raw[:, :, 0], 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
-        else:
-            pv_train_pred = np.clip(y_train_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
-            pv_test_pred = np.clip(y_test_pred_raw, 0, pv_cfg['nameplate_capacity_kw'] * 1.2)
-        
-        # Need match indices for actuals too
-        _, _, train_idx_local = create_sequences_with_indices(
-            np.zeros((len(df_train), 1)), np.zeros(len(df_train)),
-            df_train.index, lookback, horizon)
-        _, _, test_idx_local = create_sequences_with_indices(
-            np.zeros((len(df_test), 1)), np.zeros(len(df_test)),
-            df_test.index, lookback, horizon)
-        
-        n_train = min(len(train_idx_local), len(pv_train_pred))
-        n_test = min(len(test_idx_local), len(pv_test_pred))
-        train_idx_local = train_idx_local[:n_train]
-        test_idx_local = test_idx_local[:n_test]
-        pv_train_pred = pv_train_pred[:n_train]
-        pv_test_pred = pv_test_pred[:n_test]
-
-    # Actual values
-    pv_train_actual = df_train[target_col].values[train_idx_local[:, np.newaxis] + steps]
-    pv_test_actual = df_test[target_col].values[test_idx_local[:, np.newaxis] + steps]
-
-    # GHI for filtering productive hours
-    ghi_col = cfg['data']['ghi_col']
-    ghi_train = df_train[ghi_col].values[train_idx_local[:, np.newaxis] + steps]
-    ghi_test = df_test[ghi_col].values[test_idx_local[:, np.newaxis] + steps]
-
-    # ============================================================
-    # HOUR-BASED WRAPPER: Zero out predictions during nighttime
-    # Strategy: Train on full 24h data for temporal continuity,
-    # but force predictions to 0 when GHI < threshold (no sun = no power).
-    # This eliminates nighttime "hallucination" noise from metrics.
-    # ============================================================
-    wrapper_threshold = cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)
-    night_mask_train = ghi_train < wrapper_threshold
-    night_mask_test = ghi_test < wrapper_threshold
-    
-    n_zeroed_train = night_mask_train.sum()
-    n_zeroed_test = night_mask_test.sum()
-    print(f"\n🌙 Hour-Based Wrapper (GHI < {wrapper_threshold} W/m²):")
-    print(f"  Train: {n_zeroed_train:,} predictions forced to 0 "
-          f"({n_zeroed_train/night_mask_train.size*100:.1f}%)")
-    print(f"  Test:  {n_zeroed_test:,} predictions forced to 0 "
-          f"({n_zeroed_test/night_mask_test.size*100:.1f}%)")
-    
-    pv_train_pred[night_mask_train] = 0.0
-    pv_test_pred[night_mask_test] = 0.0
-
-    # ============================================================
-    # METRICS: ALL HOURS (Primary) + Productive Hours (Secondary)
-    # ============================================================
-    print("\nFINAL PERFORMANCE ANALYSIS")
-    
-    # PRIMARY: ALL hours (model gets credit for nighttime zeros via wrapper)
-    m_train = calculate_full_metrics(pv_train_actual, pv_train_pred,
-                                      None, "TRAIN", pv_cfg['nameplate_capacity_kw'])
-    m_test = calculate_full_metrics(pv_test_actual, pv_test_pred,
-                                     None, "TEST", pv_cfg['nameplate_capacity_kw'])
-    
-    # SECONDARY: Productive hours only (diagnostic)
-    m_train_prod = calculate_full_metrics(pv_train_actual, pv_train_pred,
-                                           ghi_train, "TRAIN", pv_cfg['nameplate_capacity_kw'])
-    m_test_prod = calculate_full_metrics(pv_test_actual, pv_test_pred,
-                                          ghi_test, "TEST", pv_cfg['nameplate_capacity_kw'])
-    
-    # ============================================================
-    # PER-STEP R² DIAGNOSTICS
-    # Shows how prediction quality degrades with forecast horizon
-    # ============================================================
-    per_step_r2 = {}
-    for step_idx in range(horizon):
-        step_actual = pv_test_actual[:, step_idx]
-        step_pred = pv_test_pred[:, step_idx]
-        if len(step_actual) > 10 and np.std(step_actual) > 0:
-            per_step_r2[step_idx + 1] = float(r2_score(step_actual, step_pred))
-    
-    print(f"\n📊 Per-Step R² (Test):")
-    for s in [1, 6, 12, 24]:
-        if s in per_step_r2:
-            print(f"  Step t+{s:2d}: R²={per_step_r2[s]:.4f}")
-    
-    # ============================================================
-    # PER-HOUR-OF-DAY ERROR DIAGNOSTICS
-    # Shows which clock hours are hardest to predict
-    # ============================================================
-    time_col = cfg['data']['time_col']
-    hourly_errors = {}
-    try:
-        # Get timestamps for test predictions  
-        test_timestamps = pd.to_datetime(df_test[time_col].values)
-        for step_idx in range(horizon):
-            # Get the actual clock hour for each prediction at this step
-            pred_indices = test_idx_local + step_idx
-            valid = pred_indices < len(test_timestamps)
-            if valid.sum() == 0:
-                continue
-            hours = test_timestamps[pred_indices[valid]].hour
-            actual_vals = pv_test_actual[valid, step_idx]
-            pred_vals = pv_test_pred[valid, step_idx]
-            errors = np.abs(actual_vals - pred_vals)
+    if use_csi:
+        from src.data_prep import calculate_clear_sky_pv
+        def get_cs(df):
+            if 'pv_clear_sky' in df.columns:
+                return df['pv_clear_sky'].values
+                
+            poa_c = cfg['data'].get('poa_col', cfg['data']['ghi_col'])
+            if poa_c not in df.columns: poa_c = cfg['data']['ghi_col']
+            wind_c = cfg['data'].get('wind_speed_col')
+            if wind_c not in df.columns: wind_c = None
             
-            for h, err, act, prd in zip(hours, errors, actual_vals, pred_vals):
-                if h not in hourly_errors:
-                    hourly_errors[h] = {'mae_sum': 0, 'count': 0, 
-                                        'actual_sum': 0, 'pred_sum': 0,
-                                        'sq_err_sum': 0, 'actual_list': [], 'pred_list': []}
-                hourly_errors[h]['mae_sum'] += err
-                hourly_errors[h]['sq_err_sum'] += err**2
-                hourly_errors[h]['count'] += 1
-                hourly_errors[h]['actual_sum'] += act
-                hourly_errors[h]['pred_sum'] += prd
-                hourly_errors[h]['actual_list'].append(act)
-                hourly_errors[h]['pred_list'].append(prd)
+            return calculate_clear_sky_pv(df[cfg['data']['ghi_col']].values, df[poa_c].values,
+                                          df[cfg['data']['temp_col']].values, df[wind_c].values if wind_c else None,
+                                          pv_cfg['nameplate_capacity_kw'], pv_cfg.get('temp_coeff', -0.004), pv_cfg.get('ref_temp', 25.0), pv_cfg.get('system_efficiency', 0.85))
         
-        # Compute final per-hour metrics
-        hourly_metrics = {}
-        for h in sorted(hourly_errors.keys()):
-            d = hourly_errors[h]
-            n = d['count']
-            h_mae = d['mae_sum'] / n
-            h_rmse = np.sqrt(d['sq_err_sum'] / n)
-            act_arr = np.array(d['actual_list'])
-            prd_arr = np.array(d['pred_list'])
-            h_r2 = float(r2_score(act_arr, prd_arr)) if np.std(act_arr) > 0 else 0.0
-            hourly_metrics[int(h)] = {'mae': round(h_mae, 4), 'rmse': round(h_rmse, 4), 
-                                       'r2': round(h_r2, 4), 'count': n}
+        cs_arr_tr = get_cs(df_train)
+        cs_arr_ts = get_cs(df_test)
+        cs_tr = cs_arr_tr[train_indices[:, np.newaxis] + steps]
+        cs_ts = cs_arr_ts[test_indices[:, np.newaxis] + steps]
+        pv_tr_p = np.clip(y_tr_r[:,:,0] if len(y_tr_r.shape)==3 else y_tr_r, 0, 1.2) * cs_tr
+        pv_ts_p = np.clip(y_ts_r[:,:,0] if len(y_ts_r.shape)==3 else y_ts_r, 0, 1.2) * cs_ts
         
-        print(f"\n🕐 Per-Hour-of-Day Error (Test):")
-        print(f"  {'Hour':>4} | {'MAE':>8} | {'RMSE':>8} | {'R²':>8} | {'N':>6}")
-        print(f"  {'-'*4}-+-{'-'*8}-+-{'-'*8}-+-{'-'*8}-+-{'-'*6}")
-        for h in range(24):
-            if h in hourly_metrics:
-                m = hourly_metrics[h]
-                print(f"  {h:4d} | {m['mae']:8.4f} | {m['rmse']:8.4f} | {m['r2']:8.4f} | {m['count']:6d}")
-    except Exception as e:
-        hourly_metrics = {}
-        per_step_r2 = {}
-        print(f"⚠️ Could not compute hourly diagnostics: {e}")
+        # Robustly guess original capacity to avoid nMAE / nRMSE exploding
+        # Clear Sky maximum is practically identical to effective Nameplate Capacity
+        eval_capacity_kw = max(np.max(cs_arr_tr), np.max(cs_arr_ts))
+    else:
+        eval_capacity_kw = pv_cfg['nameplate_capacity_kw']
+        pv_tr_p = np.clip(y_tr_r, 0, eval_capacity_kw * 1.2)
+        pv_ts_p = np.clip(y_ts_r, 0, eval_capacity_kw * 1.2)
+
+    t_col = cfg['data']['target_col']
+    # Fallback to whatever is available in the dataframe if the config one doesn't exist but the other does
+    if t_col not in df_train.columns and 'pv_output_kw' in df_train.columns: t_col = 'pv_output_kw'
+    
+    pv_tr_a = df_train[t_col].values[train_indices[:, np.newaxis] + steps]
+    pv_ts_a = df_test[t_col].values[test_indices[:, np.newaxis] + steps]
+    ghi_ts = df_test[cfg['data']['ghi_col']].values[test_indices[:, np.newaxis] + steps]
+    pv_ts_p[ghi_ts < cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)] = 0
+
+    m_train = calculate_full_metrics(pv_tr_a, pv_tr_p, None, "TRAIN", eval_capacity_kw)
+    m_test = calculate_full_metrics(pv_ts_a, pv_ts_p, None, "TEST", eval_capacity_kw)
 
     return {
         'metrics_train': m_train, 'metrics_test': m_test,
-        'metrics_train_productive': m_train_prod, 'metrics_test_productive': m_test_prod,
-        'per_step_r2': per_step_r2,
-        'hourly_metrics': hourly_metrics,
-        'pv_train_actual': pv_train_actual, 'pv_train_pred': pv_train_pred,
-        'pv_test_actual': pv_test_actual, 'pv_test_pred': pv_test_pred,
-        'ghi_train': ghi_train, 'ghi_test': ghi_test,
+        'pv_train_actual': pv_tr_a, 'pv_train_pred': pv_tr_p,
+        'pv_test_actual': pv_ts_a, 'pv_test_pred': pv_ts_p,
         'df_train': df_train, 'df_test': df_test,
-        'train_indices': train_idx_local, 'test_indices': test_idx_local,
+        'train_indices': train_indices, 'test_indices': test_indices,
+        'data_path': f"{os.path.basename(data_proc_src)}{' (Synced)' if data_reconstructed else ''}",
+        'history': getattr(model, 'history', None),
+        'inference_time_ms': inf_time_ms
     }
 
 
@@ -532,12 +478,25 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
         model = load_hf_wrapper(model_path)
     else:
         if os.path.isdir(model_path):
-            for ext in ['.h5', '.keras']:
-                candidate = os.path.join(model_path, f'model{ext}')
+            for candidate in [
+                os.path.join(model_path, f'model.keras'),
+                os.path.join(model_path, f'model.h5'),
+                os.path.join(model_path, f'pytorch_model.bin'),
+                model_path  # The directory itself might be a SavedModel (contains saved_model.pb)
+            ]:
                 if os.path.exists(candidate):
+                    if candidate == model_path and not os.path.exists(os.path.join(model_path, 'saved_model.pb')):
+                        continue # If directory and no saved_model.pb, try next
                     actual_model_path = candidate
+                    
+                    # If it's a pytorch bin but config.json is missing, load_hf_wrapper won't trigger above.
+                    # We should force HF load here to be safe.
+                    if candidate.endswith('.bin') and not is_hf:
+                        is_hf = True
+                        from src.model_hf import load_hf_wrapper
+                        model = load_hf_wrapper(model_path)
+                    
                     break
-        
         # WORKAROUND: .keras as HDF5
         import zipfile
         if actual_model_path.endswith('.keras') and not zipfile.is_zipfile(actual_model_path):
@@ -548,38 +507,86 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 shutil.copy(actual_model_path, h5_path)
             actual_model_path = h5_path
             
-        model_loaded = False
-        try:
+        model_loaded = is_hf # Already loaded above if HF
+        
+        if not is_hf:
             try:
-                model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
-            except TypeError:
-                model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects())
-            model_loaded = True
-        except Exception as load_err:
-            err_str = str(load_err).lower()
-            
-            # CASE 1: Keras 3 ZIP format or OneDrive access issue
-            if "signature not found" in err_str or "unable to synchronously open" in err_str or "invalid argument" in err_str:
-                import zipfile as zf
-                if actual_model_path.endswith('.keras') and zf.is_zipfile(actual_model_path):
-                    print(f"[RECOVER] Keras 3 ZIP format terdeteksi. Mengekstrak dan membangun ulang...")
-                    import json as _json
-                    from src.model_factory import build_model, compile_model, manual_load_k3_weights
+                try:
+                    model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects(), safe_mode=False)
+                except TypeError:
+                    model = tf.keras.models.load_model(actual_model_path, custom_objects=get_custom_objects())
+                model_loaded = True
+            except Exception as load_err:
+                err_str = str(load_err).lower()
+                
+                # CASE 1: Keras 3 ZIP format or OneDrive access issue
+                if "signature not found" in err_str or "unable to synchronously open" in err_str or "invalid argument" in err_str:
+                    import zipfile as zf
+                    if actual_model_path.endswith('.keras') and zf.is_zipfile(actual_model_path):
+                        print(f"[RECOVER] Keras 3 ZIP format terdeteksi. Mengekstrak dan membangun ulang...")
+                        import json as _json
+                        from src.model_factory import build_model, compile_model, manual_load_k3_weights
+                        
+                        extract_dir = os.path.join(model_root, '_extracted_k3')
+                        os.makedirs(extract_dir, exist_ok=True)
+                        with zf.ZipFile(actual_model_path, 'r') as z:
+                            z.extractall(extract_dir)
+                        
+                        weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                        
+                        # Read meta.json
+                        m_meta = {}
+                        meta_path = os.path.join(model_root, 'meta.json')
+                        if os.path.exists(meta_path):
+                            try:
+                                with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
+                            except: pass
+                        
+                        arch = m_meta.get('architecture', cfg['model']['architecture'])
+                        lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                        nf = m_meta.get('n_features', 0)
+                        hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
+                        hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                        
+                        if nf == 0:
+                            prep_path = os.path.join(model_root, 'prep_summary.json')
+                            if os.path.exists(prep_path):
+                                try:
+                                    with open(prep_path, 'r') as f:
+                                        p_meta = _json.load(f)
+                                        if n_f := p_meta.get('n_features'): nf = n_f
+                                        if l_b := p_meta.get('lookback'): lb = l_b
+                                        if h_z := p_meta.get('horizon'): hz = h_z
+                                except: pass
+                        
+                        if nf == 0:
+                            raise ValueError(f"Rebuild gagal: n_features=0 di meta.json. Lokasi: {model_root}")
+                            
+                        model = build_model(arch, lb, nf, hz, hp)
+                        compile_model(model, hp.get('learning_rate', 0.001))
+                        
+                        if os.path.exists(weights_h5):
+                            manual_load_k3_weights(model, weights_h5)
+                            print(f"[OK] Model rebuild berhasil (Keras 3 ZIP).")
+                            model_loaded = True
+                    else:
+                        # Truly unreadable
+                        raise ValueError(
+                            f"File model '{os.path.basename(actual_model_path)}' tidak dapat dibaca. "
+                            f"Coba: Klik Kanan folder '{os.path.basename(model_root)}' -> 'Always keep on this device'."
+                        )
+                
+                # CASE 2: Python version mismatch (marshal error)
+                elif "bad marshal data" in err_str or "unknown type code" in err_str:
+                    print(f"[RECOVER] Terjadi error marshal. Mencoba membangun ulang model...")
+                    from src.model_factory import build_model, manual_load_k3_weights
                     
-                    extract_dir = os.path.join(model_root, '_extracted_k3')
-                    os.makedirs(extract_dir, exist_ok=True)
-                    with zf.ZipFile(actual_model_path, 'r') as z:
-                        z.extractall(extract_dir)
-                    
-                    weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
-                    
-                    # Read meta.json
+                    # ... reuse m_meta logic ...
                     m_meta = {}
                     meta_path = os.path.join(model_root, 'meta.json')
                     if os.path.exists(meta_path):
-                        try:
-                            with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
-                        except: pass
+                        import json as _json
+                        with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
                     
                     arch = m_meta.get('architecture', cfg['model']['architecture'])
                     lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
@@ -591,74 +598,50 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                         prep_path = os.path.join(model_root, 'prep_summary.json')
                         if os.path.exists(prep_path):
                             try:
+                                import json as _json
                                 with open(prep_path, 'r') as f:
-                                    p_meta = _json.load(f)
-                                    if n_f := p_meta.get('n_features'): nf = n_f
-                                    if l_b := p_meta.get('lookback'): lb = l_b
-                                    if h_z := p_meta.get('horizon'): hz = h_z
+                                    p_m = _json.load(f)
+                                    if n_f := p_m.get('n_features'): nf = n_f
                             except: pass
                     
-                    if nf == 0:
-                        raise ValueError(f"Rebuild gagal: n_features=0 di meta.json. Lokasi: {model_root}")
-                        
                     model = build_model(arch, lb, nf, hz, hp)
-                    compile_model(model, hp.get('learning_rate', 0.001))
-                    
-                    if os.path.exists(weights_h5):
-                        manual_load_k3_weights(model, weights_h5)
-                        print(f"[OK] Model rebuild berhasil (Keras 3 ZIP).")
-                        model_loaded = True
+                    manual_load_k3_weights(model, actual_model_path)
+                    model_loaded = True
                 else:
-                    # Truly unreadable
-                    raise ValueError(
-                        f"File model '{os.path.basename(actual_model_path)}' tidak dapat dibaca. "
-                        f"Coba: Klik Kanan folder '{os.path.basename(model_root)}' -> 'Always keep on this device'."
-                    )
-            
-            # CASE 2: Python version mismatch (marshal error)
-            elif "bad marshal data" in err_str or "unknown type code" in err_str:
-                print(f"[RECOVER] Terjadi error marshal. Mencoba membangun ulang model...")
-                from src.model_factory import build_model, manual_load_k3_weights
+                    raise load_err
                 
-                # ... reuse m_meta logic ...
-                m_meta = {}
-                meta_path = os.path.join(model_root, 'meta.json')
-                if os.path.exists(meta_path):
-                    import json as _json
-                    with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
-                
-                arch = m_meta.get('architecture', cfg['model']['architecture'])
-                lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
-                nf = m_meta.get('n_features', 0)
-                hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
-                hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
-                
-                if nf == 0:
-                    prep_path = os.path.join(model_root, 'prep_summary.json')
-                    if os.path.exists(prep_path):
-                        try:
-                            import json as _json
-                            with open(prep_path, 'r') as f:
-                                p_m = _json.load(f)
-                                if n_f := p_m.get('n_features'): nf = n_f
-                        except: pass
-                
-                model = build_model(arch, lb, nf, hz, hp)
-                manual_load_k3_weights(model, actual_model_path)
-                model_loaded = True
+        if not is_hf:
+            from src.model_factory import fix_lambda_tf_refs
+            if model_loaded:
+                fix_lambda_tf_refs(model)
             else:
-                raise load_err
-                
-        from src.model_factory import fix_lambda_tf_refs
-        if model_loaded:
-            fix_lambda_tf_refs(model)
-        else:
-            raise ValueError("Gagal memuat model.")
+                raise ValueError("Gagal memuat model.")
 
+    # Read meta.json for model shape info (used as fallback, especially for HF models)
+    import json as _json_meta
+    meta_info = {}
+    meta_json_path = os.path.join(model_root, 'meta.json')
+    if os.path.exists(meta_json_path):
+        try:
+            with open(meta_json_path, 'r', encoding='utf-8') as f:
+                meta_info = _json_meta.load(f)
+        except: pass
     
-    expected_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else None
-    lookback = model.input_shape[1] if hasattr(model, 'input_shape') else cfg['model']['hyperparameters']['lookback']
-    horizon = model.output_shape[1] if hasattr(model, 'output_shape') else cfg['forecasting']['horizon']
+    if is_hf:
+        # HF models don't have .input_shape / .output_shape
+        expected_n_features = meta_info.get('n_features', None)
+        # lookback may be at top-level or inside hyperparameters
+        lookback = meta_info.get('lookback', 
+                     meta_info.get('hyperparameters', {}).get('lookback', 
+                       cfg['model']['hyperparameters']['lookback']))
+        # horizon may be 'forecast_horizon' or 'horizon'
+        horizon = meta_info.get('forecast_horizon', 
+                    meta_info.get('horizon', 
+                      cfg['forecasting']['horizon']))
+    else:
+        expected_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else None
+        lookback = model.input_shape[1] if hasattr(model, 'input_shape') else cfg['model']['hyperparameters']['lookback']
+        horizon = model.output_shape[1] if hasattr(model, 'output_shape') else cfg['forecasting']['horizon']
 
     # 2. Load TARGET data (raw features, UNSCALED)
     import joblib

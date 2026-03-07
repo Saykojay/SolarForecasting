@@ -40,3 +40,17 @@ _*.txt
 
 # Per-device local config (conda env name)
 env_config.txt
+
+# Local machine configs
+config-*.yaml
+
+# Other Databases & Models
+*.db
+*.xlsx
+*.csv
+*.h5
+*.keras
+test.json
+
+# Tuning Results
+tuning results/

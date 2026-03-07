@@ -667,6 +667,7 @@ def run_preprocessing(cfg: dict, version_name: str = None, method: str = 'fixed'
         'horizon': forecast_horizon,
         'csv_source': cols['csv_path'],
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'pv_system': cfg.get('pv_system', {}),
         'corr_matrix': corr_matrix.to_dict() 
     }
     

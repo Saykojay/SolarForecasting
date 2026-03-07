@@ -250,6 +250,7 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
         'timestamp': timestamp,
         'forecast_horizon': horizon,
         'n_features': n_features,
+        'pv_system': cfg.get('pv_system', {}),
         'data_source': proc_dir
     }
 
@@ -635,6 +636,123 @@ def run_tscv(cfg: dict, data: dict = None):
     return metrics_per_fold
 
 
+def _load_transfer_data(proc, model_root, model_lookback, model_n_features, horizon, cfg):
+    """
+    Truly ROBUST data loader for Transfer Learning / Sweep.
+    Enforces the lookback and feature count required by the MODEL's actual architecture.
+    """
+    import json
+    import joblib
+    import os
+    import pandas as pd
+    import numpy as np
+    from src.data_prep import create_sequences_with_indices
+
+    def _get_ft_list(folder):
+        fp = os.path.join(folder, 'selected_features.json').replace('\\', '/')
+        if os.path.exists(fp):
+            try:
+                with open(fp, 'r') as _f: 
+                    l = json.load(_f)
+                    return l if isinstance(l, list) else None
+            except: pass
+        
+        # Check prep_summary too
+        pp = os.path.join(folder, 'prep_summary.json').replace('\\', '/')
+        if os.path.exists(pp):
+            try:
+                with open(pp, 'r') as _f: 
+                    d = json.load(_f)
+                    return d.get('selected_features')
+            except: pass
+        return None
+
+    # Step A: Find feature names used by MODEL
+    model_feat_list = _get_ft_list(model_root)
+    
+    # Check meta.json for data_source to find original selected_features if missing in bundle
+    meta_p = os.path.join(model_root, 'meta.json')
+    if not model_feat_list and os.path.exists(meta_p):
+        try:
+            with open(meta_p, 'r') as f:
+                md = json.load(f)
+                ds = md.get('data_source')
+                if ds and os.path.exists(ds):
+                    model_feat_list = _get_ft_list(ds)
+        except: pass
+
+    # Step B: Setup Target Data access
+    p_train = os.path.join(proc, 'df_train_feats.pkl')
+    p_test = os.path.join(proc, 'df_test_feats.pkl')
+    if not os.path.exists(p_train):
+        raise FileNotFoundError(f"Transfer Error: PKL data tidak ditemukan di {proc}. Pastikan Step 1 (Preprocessing) Target Folder sudah jalan.")
+        
+    df_train = pd.read_pickle(p_train)
+    df_test = pd.read_pickle(p_test)
+    y_c = 'csi_target' if 'csi_target' in df_train.columns else cfg['data']['target_col']
+    
+    # Step C: Align Features
+    # If we have names, use them. If not, we MUST have exactly model_n_features.
+    if model_feat_list:
+        valid_ft = [f for f in model_feat_list if f in df_train.columns]
+        if len(valid_ft) != len(model_feat_list):
+            missing = set(model_feat_list) - set(valid_ft)
+            print(f"   [ALIGNMENT] Missing {len(missing)} features. Filling with zeros for compatibility.")
+            # Fill missing with zeros
+            X_tr_df = df_train[valid_ft].copy()
+            X_ts_df = df_test[valid_ft].copy()
+            for m in missing:
+                X_tr_df[m] = 0.0
+                X_ts_df[m] = 0.0
+            # Ensure correct order
+            X_tr_df = X_tr_df[model_feat_list]
+            X_ts_df = X_ts_df[model_feat_list]
+        else:
+            X_tr_df, X_ts_df = df_train[model_feat_list], df_test[model_feat_list]
+    else:
+        # No feature list found. Fallback to selection based on count.
+        all_numeric = df_train.select_dtypes(include=[np.number]).drop(columns=[y_c] if y_c in df_train.columns else [])
+        if all_numeric.shape[1] < model_n_features:
+            raise ValueError(f"Target data has only {all_numeric.shape[1]} features, but model expects {model_n_features}.")
+        
+        # Take the first N features (Risky but necessary if metadata is lost)
+        print(f"   [WARN] No selected_features.json found for model. Taking first {model_n_features} numeric features from target.")
+        X_tr_df = all_numeric.iloc[:, :model_n_features]
+        X_ts_df = df_test[all_numeric.columns].iloc[:, :model_n_features]
+
+    # Step D: Scaling
+    sc_x_path = os.path.join(model_root, 'X_scaler.pkl').replace('\\', '/')
+    sc_y_path = os.path.join(model_root, 'y_scaler.pkl').replace('\\', '/')
+    if not os.path.exists(sc_x_path): sc_x_path = os.path.join(proc, 'X_scaler.pkl').replace('\\', '/')
+    if not os.path.exists(sc_y_path): sc_y_path = os.path.join(proc, 'y_scaler.pkl').replace('\\', '/')
+    
+    x_scaler = joblib.load(sc_x_path)
+    y_scaler = joblib.load(sc_y_path)
+    
+    # Silence Sklearn UserWarnings about feature names for Transfer Learning
+    import warnings
+    # Fix UserWarning: ensure we pass DataFrame matching feature names if possible
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            X_train_scaled = x_scaler.transform(X_tr_df)
+            X_test_scaled = x_scaler.transform(X_ts_df)
+        except:
+            # Fallback to values if names fail
+            X_train_scaled = x_scaler.transform(X_tr_df.values)
+            X_test_scaled = x_scaler.transform(X_ts_df.values)
+        
+    y_train_scaled = y_scaler.transform(df_train[y_c].values.reshape(-1, 1)).flatten()
+    y_test_scaled = y_scaler.transform(df_test[y_c].values.reshape(-1, 1)).flatten()
+    
+    # Step E: Sequencing (Lookback is key to avoiding mat1/mat2 shape errors)
+    print(f"   [DATA] Sequencing for model: features={model_n_features}, lookback={model_lookback}, horizon={horizon}")
+    X_train_seq, y_train_seq, _ = create_sequences_with_indices(X_train_scaled, y_train_scaled, df_train.index, model_lookback, horizon)
+    X_test_seq, y_test_seq, _ = create_sequences_with_indices(X_test_scaled, y_test_scaled, df_test.index, model_lookback, horizon)
+    
+    return {'X_train': X_train_seq, 'y_train': y_train_seq, 'X_test': X_test_seq, 'y_test': y_test_seq}
+
+
 def fine_tune_model(cfg, source_model_path, data=None, ft_config=None, extra_callbacks=None):
     """
     Fine-tune an existing model on new data with optional granular configuration.
@@ -654,194 +772,259 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None, extra_cal
     print(f"\n🚀 FINE-TUNING MODE")
     print(f"   Source Model: {source_model_path}")
     
-    # Absolute path check — prefer .h5 first (more compatible with this project)
-    model_file = source_model_path
-    if os.path.isdir(source_model_path):
-        for ext in ['.h5', '.keras']:
-            candidate = os.path.join(source_model_path, f'model{ext}')
-            if os.path.exists(candidate):
-                model_file = candidate
-                break
-    
-    print(f"   Loading model from: {model_file}")
-    
-    # Try loading with fallback
-    try:
+    # Ensure a clean slate for layer naming
+    import tensorflow as tf
+    tf.keras.backend.clear_session()    
+    # NEW: HuggingFace/PyTorch Detection
+    is_hf = False
+    model_root = source_model_path if os.path.isdir(source_model_path) else os.path.dirname(source_model_path)
+    meta_p = os.path.join(model_root, 'meta.json')
+    meta_data = {}
+    if os.path.exists(meta_p):
         try:
-            model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), safe_mode=False)
-        except TypeError:
-            model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects())
-    except Exception as e1:
-        err_str = str(e1).lower()
-        # Keras 3 ZIP format on TF 2.x
-        if ("signature not found" in err_str or "unable to synchronously open" in err_str) and model_file.endswith('.keras'):
-            import zipfile
-            if zipfile.is_zipfile(model_file):
-                print(f"   [RECOVER] Keras 3 ZIP format detected. Extracting and rebuilding...")
-                import json as _json
-                model_root = os.path.dirname(model_file)
-                extract_dir = os.path.join(model_root, '_extracted_k3')
-                os.makedirs(extract_dir, exist_ok=True)
-                with zipfile.ZipFile(model_file, 'r') as zf:
-                    zf.extractall(extract_dir)
-                weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
-                
-                m_meta = {}
-                meta_path = os.path.join(model_root, 'meta.json')
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
-                    except: pass
-                from src.model_factory import build_model, compile_model
-                arch = m_meta.get('architecture', cfg['model']['architecture'])
-                hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
-                lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
-                nf = m_meta.get('n_features', 0)
-                hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
-                
-                if nf == 0:
-                    prep_p = os.path.join(model_root, 'prep_summary.json')
-                    if os.path.exists(prep_p):
-                        try:
-                            with open(prep_p, 'r') as f:
-                                p_m = _json.load(f)
-                                if n_f := p_m.get('n_features'): nf = n_f
-                                if l_b := p_m.get('lookback'): lb = l_b
-                                if h_z := p_m.get('horizon'): hz = h_z
-                        except: pass
-                        
-                from src.model_factory import manual_load_k3_weights
-                model = build_model(arch, lb, nf, hz, hp)
-                manual_load_k3_weights(model, weights_h5)
-                print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded manual.")
-            else:
-                raise e1
-        else:
-            print(f"   [WARN] Failed to load {model_file}: {e1}")
-            alt_file = model_file.replace('.keras', '.h5') if model_file.endswith('.keras') else model_file.replace('.h5', '.keras')
-            if os.path.exists(alt_file):
-                print(f"   Trying alternative: {alt_file}")
-                try:
-                    model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
-                except TypeError:
-                    model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects())
-            else:
-                try:
-                    model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
-                except TypeError:
-                    model = tf.keras.models.load_model(model_file, compile=False)
+            with open(meta_p, 'r') as f:
+                meta_data = json.load(f)
+                if 'hf' in meta_data.get('architecture', '').lower() or 'causal' in meta_data.get('architecture', '').lower():
+                    is_hf = True
+        except: pass
     
-    fix_lambda_tf_refs(model)
+    if not is_hf and os.path.isdir(model_root):
+        if os.path.exists(os.path.join(model_root, 'pytorch_model.bin')) or os.path.exists(os.path.join(model_root, 'config.json')):
+            is_hf = True
 
-    # NEW: Layer Freezing
-    if ft_config.get('freeze_backbone', False):
-        last_n = ft_config.get('trainable_last_n', 2)
-        print(f"   Freezing backbone, keeping last {last_n} layers trainable...")
-        for layer in model.layers[:-last_n]:
-            layer.trainable = False
-        for layer in model.layers[-last_n:]:
-            layer.trainable = True
+    reset_weights = ft_config.get('reset_weights', False)
+
+    if not reset_weights:
+        if is_hf:
+            from src.model_hf import load_hf_wrapper
+            import torch
+            print(f"   [HF] HuggingFace/PyTorch model detected. Loading wrapper...")
+            model = load_hf_wrapper(model_root)
+            
+            # IMPROVED: Module-based Freezing (Matches UI Slider)
+            if ft_config.get('freeze_backbone', False):
+                torch_model = model.model
+                # named_modules() gives us the exact same list as the UI Layer Browser
+                modules = list(torch_model.named_modules())
+                total_mod = len(modules)
+                last_n = ft_config.get('trainable_last_n', 2)
+                split_idx = total_mod - last_n
+                
+                print(f"   [HF] Freezing logic: Total Modules={total_mod}, Split Index={split_idx}")
+                
+                # 1. Freeze EVERYTHING first
+                for param in torch_model.parameters():
+                    param.requires_grad = False
+                    
+                # 2. Unfreeze modules from split_idx onwards
+                trainable_names = []
+                for i, (m_name, m_obj) in enumerate(modules):
+                    if i >= split_idx:
+                        # Unfreeze all parameters belonging to this specific module
+                        for p in m_obj.parameters():
+                            p.requires_grad = True
+                        if m_name: trainable_names.append(m_name)
+                
+                if trainable_names:
+                    print(f"   [HF] Trainable Modules: {', '.join(trainable_names[:5])}{'...' if len(trainable_names)>5 else ''}")
+        else:
+            # Standard Keras Path
+            # Absolute path check — prefer .h5 first (more compatible with this project)
+            model_file = source_model_path
+            if os.path.isdir(source_model_path):
+                found_kf = False
+                for ext in ['.h5', '.keras']:
+                    candidate = os.path.join(source_model_path, f'model{ext}')
+                    if os.path.exists(candidate):
+                        model_file = candidate
+                        found_kf = True
+                        break
+                if not found_kf:
+                    # Last resort: maybe just the model folder itself for a SavedModel
+                    model_file = source_model_path
+
+            print(f"   Loading Keras model from: {model_file}")
+            
+            # Try loading with fallback
+            try:
+                try:
+                    model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), safe_mode=False)
+                except TypeError:
+                    model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects())
+            except Exception as e1:
+                err_str = str(e1).lower()
+                # Keras 3 ZIP format on TF 2.x
+                if ("signature not found" in err_str or "unable to synchronously open" in err_str) and str(model_file).endswith('.keras'):
+                    import zipfile
+                    if zipfile.is_zipfile(model_file):
+                        print(f"   [RECOVER] Keras 3 ZIP format detected. Extracting and rebuilding...")
+                        import json as _json
+                        model_root_k3 = os.path.dirname(model_file)
+                        extract_dir = os.path.join(model_root_k3, '_extracted_k3')
+                        os.makedirs(extract_dir, exist_ok=True)
+                        with zipfile.ZipFile(model_file, 'r') as zf:
+                            zf.extractall(extract_dir)
+                        weights_h5 = os.path.join(extract_dir, 'model.weights.h5')
+                        
+                        m_meta = {}
+                        meta_path = os.path.join(model_root_k3, 'meta.json')
+                        if os.path.exists(meta_path):
+                            try:
+                                with open(meta_path, 'r', encoding='utf-8') as f: m_meta = _json.load(f)
+                            except: pass
+                        from src.model_factory import build_model, compile_model
+                        arch = m_meta.get('architecture', cfg['model']['architecture'])
+                        hp = m_meta.get('hyperparameters', cfg['model']['hyperparameters'])
+                        lb = m_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+                        nf = m_meta.get('n_features', 0)
+                        hz = m_meta.get('horizon', cfg['forecasting']['horizon'])
+                        
+                        if nf == 0:
+                            prep_p = os.path.join(model_root_k3, 'prep_summary.json')
+                            if os.path.exists(prep_p):
+                                try:
+                                    with open(prep_p, 'r') as f:
+                                        p_m = _json.load(f)
+                                        if n_f := p_m.get('n_features'): nf = n_f
+                                        if l_b := p_m.get('lookback'): lb = l_b
+                                        if h_z := p_m.get('horizon'): hz = h_z
+                                except: pass
+                                
+                        from src.model_factory import manual_load_k3_weights
+                        model = build_model(arch, lb, nf, hz, hp)
+                        manual_load_k3_weights(model, weights_h5)
+                        print(f"   [OK] Model '{arch}' rebuilt from Keras 3 ZIP and weights loaded manual.")
+                    else:
+                        raise e1
+                else:
+                    print(f"   [WARN] Failed to load {model_file}: {e1}")
+                    alt_file = str(model_file).replace('.keras', '.h5') if str(model_file).endswith('.keras') else str(model_file).replace('.h5', '.keras')
+                    if os.path.exists(alt_file):
+                        print(f"   Trying alternative: {alt_file}")
+                        try:
+                            model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects(), safe_mode=False)
+                        except TypeError:
+                            model = tf.keras.models.load_model(alt_file, custom_objects=get_custom_objects())
+                    else:
+                        try:
+                            model = tf.keras.models.load_model(model_file, compile=False, safe_mode=False)
+                        except TypeError:
+                            model = tf.keras.models.load_model(model_file, compile=False)
+            
+            fix_lambda_tf_refs(model)
+
+            # NEW: Layer Freezing (Keras)
+            if ft_config.get('freeze_backbone', False):
+                last_n = ft_config.get('trainable_last_n', 2)
+                print(f"   Freezing backbone, keeping last {last_n} layers trainable...")
+                for layer in model.layers[:-last_n]:
+                    layer.trainable = False
+                for layer in model.layers[-last_n:]:
+                    layer.trainable = True
+        
+        # 2. Extract TRUE model properties before loading data
+        model_lookback = model.input_shape[1] if hasattr(model, 'input_shape') else meta_data.get('lookback', cfg['model']['hyperparameters']['lookback'])
+        model_n_features = model.input_shape[2] if hasattr(model, 'input_shape') else meta_data.get('n_features', 0)
+    else:
+        # Build new model from scratch (Reset Weights)
+        print(f"   [RESET] Training from scratch (ignoring old weights).")
+        arch = meta_data.get('architecture', cfg['model']['architecture'])
+        hp = meta_data.get('hyperparameters', cfg['model']['hyperparameters'])
+        model_lookback = meta_data.get('lookback', hp.get('lookback', cfg['model']['hyperparameters']['lookback']))
+        model_n_features = meta_data.get('n_features', hp.get('n_features', 0))
+        horizon = meta_data.get('forecast_horizon', hp.get('horizon', cfg['forecasting']['horizon']))
+        
+        if model_n_features == 0:
+            sf_path = os.path.join(model_root, 'selected_features.json')
+            if os.path.exists(sf_path):
+                with open(sf_path, 'r') as f:
+                    model_n_features = len(json.load(f))
+            else:
+                model_n_features = 5 # Safe fallback if unable to determine
+        
+        print(f"   Building NEW model: arch={arch}, lookback={model_lookback}, features={model_n_features}")
+
+        if is_hf:
+            from src.model_hf import build_patchtst_hf, build_autoformer_hf, build_causal_transformer_hf
+            import torch
+            if arch == 'patchtst_hf':
+                torch_model = build_patchtst_hf(model_lookback, model_n_features, horizon, hp)
+            elif arch == 'autoformer_hf':
+                torch_model = build_autoformer_hf(model_lookback, model_n_features, horizon, hp)
+            elif arch == 'causal_transformer_hf':
+                torch_model = build_causal_transformer_hf(model_lookback, model_n_features, horizon, hp)
+            else:
+                torch_model = build_patchtst_hf(model_lookback, model_n_features, horizon, hp)
+            
+            class MockHFWrapper:
+                def __init__(self, m):
+                    self.model = m
+            model = MockHFWrapper(torch_model)
+        else:
+            from src.model_factory import build_model, compile_model
+            model = build_model(arch, model_lookback, model_n_features, horizon, hp)
+            compile_model(model, hp.get('learning_rate', 0.001), loss_fn=cfg['training'].get('loss_fn', 'huber'))
     
-    # 2. Prepare Data
     if data is None:
         proc = cfg['paths']['processed_dir']
+        horizon = cfg['forecasting']['horizon']
         try:
-            data = {
-                'X_train': np.load(os.path.join(proc, 'X_train.npy')),
-                'y_train': np.load(os.path.join(proc, 'y_train.npy')),
-                'X_test': np.load(os.path.join(proc, 'X_test.npy')),
-                'y_test': np.load(os.path.join(proc, 'y_test.npy')),
-            }
-        except FileNotFoundError:
-            print(f"   [.npy] files not found in {proc}. Attempting to load from pickles...")
-            # Fallback for Dynamic/Agnostic Preprocessing (no sequences saved)
-            p_train = os.path.join(proc, 'df_train_feats.pkl')
-            p_test = os.path.join(proc, 'df_test_feats.pkl')
-            p_meta = os.path.join(proc, 'prep_summary.json')
+            data = _load_transfer_data(proc, model_root, model_lookback, model_n_features, horizon, cfg)
+        except Exception as e_data:
+            print(f"   [!] Critical Data Mismatch: {e_data}")
+            raise
             
-            if not os.path.exists(p_train) or not os.path.exists(p_test):
-                raise FileNotFoundError(f"Data preprocessed (npy/pkl) tidak ditemukan di {proc}")
-            
-            df_train = pd.read_pickle(p_train)
-            df_test = pd.read_pickle(p_test)
-            
-            # Load metadata for features and target
-            target_col = cfg['data']['target_col']
-            sel_feats = []
-            if os.path.exists(p_meta):
-                try:
-                    with open(p_meta, 'r') as f:
-                        m_data = json.load(f)
-                        sel_feats = m_data.get('selected_features', [])
-                        target_col = m_data.get('target_col', target_col)
-                except: pass
-            
-            if not sel_feats:
-                # Fallback to all columns except target
-                sel_feats = [c for c in df_train.columns if c != target_col]
-            
-            # Load scalers from the same processed dir
-            s_x = joblib.load(os.path.join(proc, 'X_scaler.pkl'))
-            s_y = joblib.load(os.path.join(proc, 'y_scaler.pkl'))
-            
-            # Scale
-            X_tr_s = s_x.transform(df_train[sel_feats].values)
-            y_tr_s = s_y.transform(df_train[target_col].values.reshape(-1, 1)).flatten()
-            X_ts_s = s_x.transform(df_test[sel_feats].values)
-            y_ts_s = s_y.transform(df_test[target_col].values.reshape(-1, 1)).flatten()
-            
-            from src.data_prep import create_sequences_with_indices
-            lookback = model.input_shape[1]
-            horizon = cfg['forecasting']['horizon']
-            
-            print(f"   Sequencing data on-the-fly (lookback={lookback}, horizon={horizon})...")
-            X_train_seq, y_train_seq, _ = create_sequences_with_indices(X_tr_s, y_tr_s, df_train.index, lookback, horizon)
-            X_test_seq, y_test_seq, _ = create_sequences_with_indices(X_ts_s, y_ts_s, df_test.index, lookback, horizon)
-            
-            data = {
-                'X_train': X_train_seq, 'y_train': y_train_seq,
-                'X_test': X_test_seq, 'y_test': y_test_seq
-            }
-
-    # Align lookback
-    model_lookback = model.input_shape[1]
-    data_lookback = data['X_train'].shape[1]
-    
-    if data_lookback > model_lookback:
-        print(f"   Truncating data lookback: {data_lookback} -> {model_lookback}")
-        data['X_train'] = data['X_train'][:, -model_lookback:, :]
-        data['X_test'] = data['X_test'][:, -model_lookback:, :]
-    elif data_lookback < model_lookback:
-        raise ValueError(f"Data Target memiliki lookback ({data_lookback}) lebih kecil dari Model ({model_lookback}). Silakan preprocess data target dengan lookback {model_lookback}.")
+    print(f"   Data Ready: Train={data['X_train'].shape}, Test={data['X_test'].shape}")
     
     print(f"   Train Shape: {data['X_train'].shape}, Test/Val Shape: {data['X_test'].shape}")
     
-    # 3. Re-compile with Lower Learning Rate
+    # 3. Re-compile with Lower Learning Rate (Keras only)
     orig_lr = cfg['model']['hyperparameters'].get('learning_rate', 0.001)
     ft_lr = ft_config.get('learning_rate', orig_lr * 0.1)
     print(f"   Fine-tuning LR: {ft_lr:.6f} (Original config was {orig_lr:.6f})")
     
-    compile_model(model, ft_lr, loss_fn=cfg['training'].get('loss_fn', 'huber'))
+    if not is_hf:
+        compile_model(model, ft_lr, loss_fn=cfg['training'].get('loss_fn', 'huber'))
     
     # 4. Train
-    callbacks = _get_callbacks(cfg)
-    if extra_callbacks:
-        callbacks.extend(extra_callbacks)
+    # Separate UI callbacks from Keras-specific training callbacks
+    keras_callbacks = _get_callbacks(cfg)
+    ui_callbacks = extra_callbacks if extra_callbacks else []
     
     # Training
     t_cfg = cfg['training']
     epochs = ft_config.get('epochs', max(5, t_cfg.get('epochs', 20) // 2))
+    batch_size = cfg['model']['hyperparameters'].get('batch_size', 32)
     
-    print(f"   Fine-tuning for {epochs} epochs...")
-    history = model.fit(
-        data['X_train'], data['y_train'],
-        validation_data=(data['X_test'], data['y_test']),
-        epochs=epochs,
-        batch_size=cfg['model']['hyperparameters'].get('batch_size', 32),
-        callbacks=callbacks,
-        shuffle=True, # Critical for stability
-        verbose=1
-    )
+    if is_hf:
+        from src.model_hf import train_eval_pytorch_model
+        print(f"   [HF] Starting PyTorch fine-tuning loop for {epochs} epochs...")
+        hp_ft = cfg['model']['hyperparameters'].copy()
+        hp_ft['epochs'] = epochs
+        hp_ft['learning_rate'] = ft_lr
+        hp_ft['batch_size'] = batch_size
+        hp_ft['loss'] = cfg['training'].get('loss_fn', 'huber')
+        hp_ft['patience'] = t_cfg.get('patience', 10)
+        
+        # NOTE: Only pass UI callbacks (like Streamlit progress) to PyTorch loop
+        # Keras-specific callbacks like EarlyStopping will crash on PyTorch models
+        history, _ = train_eval_pytorch_model(
+            model.model, data['X_train'], data['y_train'], data['X_test'], data['y_test'], 
+            hp_ft, callbacks=ui_callbacks, verbose=True
+        )
+    else:
+        # Keras Training
+        all_callbacks = keras_callbacks + ui_callbacks
+        print(f"   Fine-tuning for {epochs} epochs...")
+        history = model.fit(
+            data['X_train'], data['y_train'],
+            validation_data=(data['X_test'], data['y_test']),
+            epochs=epochs,
+            batch_size=batch_size,
+            callbacks=all_callbacks,
+            shuffle=True, # Critical for stability
+            verbose=1
+        )
     
     # 5. Save as New Version
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -865,20 +1048,45 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None, extra_cal
         
     os.makedirs(save_dir, exist_ok=True)
     
-    model_path = os.path.join(save_dir, "model.keras")
-    model.save(model_path)
-    
-    # Save meta
+    if is_hf:
+        import torch
+        weights_path = os.path.join(save_dir, "pytorch_model.bin")
+        torch.save(model.model.state_dict(), weights_path)
+        # Try to save config if it exists
+        if hasattr(model.model, 'config'):
+            model.model.config.save_pretrained(save_dir)
+        print(f"   [HF] Weights saved to: {weights_path}")
+    else:
+        model_path = os.path.join(save_dir, "model.keras")
+        model.save(model_path)
+        print(f"   Model saved to: {model_path}")
     # Convert numpy types in history to native Python float for JSON serialization
     safe_history = {}
     for k, v in history.history.items():
         safe_history[k] = [float(x) for x in v]
         
+    # Extract source info robustly
+    src_meta = meta_data if 'meta_data' in locals() else {}
+    src_hp = src_meta.get('hyperparameters', {})
+    
+    # Inherit or fallback
+    arch = src_meta.get('architecture', cfg['model']['architecture'])
+    lookback = src_meta.get('lookback', src_hp.get('lookback', cfg['model']['hyperparameters']['lookback']))
+    n_features = src_meta.get('n_features', src_hp.get('n_features', 0))
+    horizon = src_meta.get('forecast_horizon', src_hp.get('forecast_horizon', cfg['forecasting']['horizon']))
+    
     meta = {
         'model_id': model_id,
         'base_model': source_model_path,
-        'architecture': cfg['model']['architecture'],
+        'architecture': arch,
+        'lookback': lookback,
+        'n_features': n_features,
+        'forecast_horizon': horizon,
+        'hyperparameters': src_hp if src_hp else cfg['model']['hyperparameters'],
+        'data_source': cfg['paths']['processed_dir'],
+        'pv_system': cfg.get('pv_system', {}),
         'fine_tuned': True,
+        'ft_config': ft_config,
         'timestamp': timestamp,
         'history': safe_history
     }
@@ -894,3 +1102,188 @@ def fine_tune_model(cfg, source_model_path, data=None, ft_config=None, extra_cal
             
     print(f"\n✅ Fine-tuning Berhasil! Model disimpan di: {save_dir}")
     return model, history, model_id
+
+
+def run_freezing_sweep(cfg, source_model_path, data=None, ft_config=None, callbacks=None):
+    """
+    Sistematically test various freezing points to find the optimal layer depth for unfreezing.
+    """
+    from src.model_factory import get_custom_objects, fix_lambda_tf_refs, compile_model
+    from src.predictor import calculate_full_metrics
+    import copy
+    import joblib
+
+    if ft_config is None:
+        ft_config = {}
+
+    epochs = ft_config.get('sweep_epochs', 3)
+    lr = ft_config.get('learning_rate', 0.0001)
+    
+    # 1. Load Metdata to detect HuggingFace vs Keras
+    model_root = source_model_path if os.path.isdir(source_model_path) else os.path.dirname(source_model_path)
+    is_hf = False
+    meta_p = os.path.join(model_root, 'meta.json')
+    mod_meta = {}
+    if os.path.exists(meta_p):
+        try:
+            with open(meta_p, 'r') as f:
+                mod_meta = json.load(f)
+                a = mod_meta.get('architecture', '').lower()
+                if 'hf' in a or 'causal' in a: is_hf = True
+        except: pass
+        
+    if not is_hf and os.path.isdir(model_root):
+        if os.path.exists(os.path.join(model_root, 'pytorch_model.bin')) or os.path.exists(os.path.join(model_root, 'config.json')):
+            is_hf = True
+
+    model_lookback = mod_meta.get('lookback', cfg['model']['hyperparameters']['lookback'])
+    model_file = source_model_path
+    if not is_hf:
+        if os.path.isdir(source_model_path):
+            found_kf = False
+            for ext in ['.h5', '.keras']:
+                if os.path.exists(os.path.join(source_model_path, f'model{ext}')):
+                    model_file = os.path.join(source_model_path, f'model{ext}')
+                    found_kf = True
+                    break
+            if not found_kf:
+                model_file = source_model_path
+        
+        # Load once to get total layers
+        tmp_model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), compile=False)
+        model_lookback = tmp_model.input_shape[1]
+        model_n_features = tmp_model.input_shape[2]
+        total_layers = len(tmp_model.layers)
+        del tmp_model
+        tf.keras.backend.clear_session()
+        import gc; gc.collect()
+    else:
+        from src.model_hf import load_hf_wrapper
+        tmp_model = load_hf_wrapper(model_root)
+        model_lookback = tmp_model.input_shape[1]
+        model_n_features = tmp_model.input_shape[2]
+        total_layers = len(list(tmp_model.model.named_modules()))
+        del tmp_model
+        import gc; gc.collect()
+
+    # 2. Load Data (Robustly matched from model roots instead of target alone)
+    if data is None:
+        proc = cfg['paths']['processed_dir']
+        horizon = cfg['forecasting']['horizon']
+        data = _load_transfer_data(proc, model_root, model_lookback, model_n_features, horizon, cfg)
+    
+    # We test a few points. If too many layers, we sample.
+    if total_layers > 20:
+        # Sample points: all of last 5, then every 5 layers
+        points = list(range(1, 6)) + list(range(10, total_layers, 5))
+        if total_layers not in points: points.append(total_layers)
+    else:
+        points = list(range(1, total_layers + 1))
+    
+    results = []
+    print(f"🚀 Starting Freezing Sweep: Testing {len(points)} freezing points...")
+    
+    for last_n in points:
+        print(f"\n--- Testing Unfreezing Last {last_n} Layers/Modules ---")
+        
+        # 3. Reload model fresh for each trial to avoid state corruption/weight mismatch
+        if is_hf:
+            from src.model_hf import load_hf_wrapper, train_eval_pytorch_model
+            current_model = load_hf_wrapper(model_root)
+            torch_model = current_model.model
+            modules = list(torch_model.named_modules())
+            split_idx = total_layers - last_n
+            
+            for param in torch_model.parameters():
+                param.requires_grad = False
+                
+            for i, (m_name, m_obj) in enumerate(modules):
+                if i >= split_idx:
+                    for p in m_obj.parameters():
+                        p.requires_grad = True
+            
+            hp_ft = cfg['model']['hyperparameters'].copy()
+            hp_ft['epochs'] = epochs
+            hp_ft['learning_rate'] = lr
+            hp_ft['batch_size'] = cfg['model']['hyperparameters'].get('batch_size', 32)
+            hp_ft['loss'] = cfg['training'].get('loss_fn', 'huber')
+            hp_ft['patience'] = 10
+            
+            # Using basic metrics from PyTorch directly here, omitting advanced UI callbacks for sweep
+            history, trained_model_raw = train_eval_pytorch_model(
+                torch_model, data['X_train'], data['y_train'], data['X_test'], data['y_test'], 
+                hp_ft, callbacks=[], verbose=0
+            )
+
+            # 4. Evaluate after training
+            from src.model_hf import HFModelWrapper
+            eval_wrapper = HFModelWrapper(trained_model_raw)
+            preds = eval_wrapper.predict(data['X_test'], verbose=0)
+            m = calculate_full_metrics(data['y_test'], preds, capacity_kw=cfg['pv_system']['nameplate_capacity_kw'])
+            
+            res = {
+                'trainable_layers': last_n,
+                'frozen_layers': total_layers - last_n,
+                'mae': float(m['mae']),
+                'rmse': float(m['rmse']),
+                'r2': float(m['r2']),
+                'nmae': float(m.get('norm_mae', 0) * 100)
+            }
+            results.append(res)
+            print(f"   Result HF: R2={res['r2']:.4f}, MAE={res['mae']:.4f}")
+            
+            import torch
+            import gc
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
+            gc.collect()
+            
+        else:
+            try:
+                current_model = tf.keras.models.load_model(model_file, custom_objects=get_custom_objects(), compile=False)
+                fix_lambda_tf_refs(current_model)
+            except Exception as e_load:
+                raise RuntimeError(f"Sweep Error: Gagal memuat model di trial {last_n}: {e_load}")
+                
+            # Apply freezing
+            layers = current_model.layers
+            for layer in layers[:-last_n]:
+                layer.trainable = False
+            for layer in layers[-last_n:]:
+                layer.trainable = True
+                
+            compile_model(current_model, lr, loss_fn=cfg['training'].get('loss_fn', 'huber'))
+            
+            # Train for few epochs
+            try:
+                current_model.fit(
+                    data['X_train'], data['y_train'],
+                    validation_data=(data['X_test'], data['y_test']),
+                    epochs=epochs,
+                    batch_size=cfg['model']['hyperparameters'].get('batch_size', 32),
+                    verbose=0,
+                    callbacks=callbacks
+                )
+                
+                # Evaluate
+                preds = current_model.predict(data['X_test'], verbose=0)
+                m = calculate_full_metrics(data['y_test'], preds, capacity_kw=cfg['pv_system']['nameplate_capacity_kw'])
+                
+                res = {
+                    'trainable_layers': last_n,
+                    'frozen_layers': total_layers - last_n,
+                    'mae': float(m['mae']),
+                    'rmse': float(m['rmse']),
+                    'r2': float(m['r2']),
+                    'nmae': float(m['norm_mae'] * 100)
+                }
+                results.append(res)
+                print(f"   Result Keras: R2={res['r2']:.4f}, MAE={res['mae']:.4f}")
+            finally:
+                # Memory Cleanup
+                del current_model
+                tf.keras.backend.clear_session()
+                import gc
+                gc.collect()
+
+    return results
+

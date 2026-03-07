@@ -259,6 +259,8 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience
             self.history = {'val_loss': []}
             
     history = DummyHistory()
+    import copy
+    best_model_state = copy.deepcopy(model.state_dict())
     best_val_loss = float('inf')
     patience_counter = 0
     
@@ -274,7 +276,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience
         
         # Cetak info mulai epoch
         if verbose:
-            print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})", flush=True)
+            print(f"\n▶️ Dimulai: Epoch {epoch+1}/{epochs} (Total Batches: {total_steps})")
         
         for step, (xb, yb) in enumerate(train_dl):
             xb, yb = xb.to(device), yb.to(device)
@@ -299,7 +301,7 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience
             
             # Print update every 20 steps or at the end
             if verbose and ((step + 1) % 20 == 0 or (step + 1) == total_steps):
-                print(f"   [Batch {step+1:03d}/{total_steps:03d}] Loss sementara: {loss.item():.5f}", flush=True)
+                print(f"   [Batch {step+1:03d}/{total_steps:03d}] Loss sementara: {loss.item():.5f}")
             
         model.eval()
         val_losses = []
@@ -324,10 +326,10 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience
         history.history['loss'].append(train_loss_mean)
         
         # Real-time console log printed to terminal
-        import sys
         if verbose:
-            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}", flush=True)
+            print(f"Epoch {epoch+1}/{epochs} - loss: {train_loss_mean:.4f} - val_loss: {val_loss:.4f}")
         elif trial is not None:
+            import sys
             sys.stdout.write(f"\r  └➜ [Trial {trial.number}] Epoch {epoch+1:03d}/{epochs} | loss: {train_loss_mean:.4f} | val_loss: {val_loss:.4f}     ")
             sys.stdout.flush()
         
@@ -350,19 +352,22 @@ def train_eval_pytorch_model(model, X_train, y_train, X_val, y_val, hp, patience
                 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_model_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 if verbose:
-                    logger.info(f"[PyTorch] EarlyStopping triggers at epoch {epoch+1}")
+                    logger.info(f"[PyTorch] EarlyStopping triggers at epoch {epoch+1}. Restoring best weights.")
                 break
                 
     if not verbose and trial is not None:
         import sys
         sys.stdout.write("\n")
         sys.stdout.flush()
-        
+    
+    # Restore best weights and return
+    model.load_state_dict(best_model_state)
     return history, model
 
 
@@ -371,13 +376,19 @@ class HFModelWrapper:
         self.model = model
         # Expose properties to mock Keras model
         if hasattr(model, 'config'):
-            self.output_shape = (None, model.config.prediction_length)
-            self.input_shape = (None, model.config.context_length, getattr(model.config, 'num_input_channels', getattr(model.config, 'input_size', 1)))
+            h = model.config.prediction_length
+            lb = model.config.context_length
+            nf = getattr(model.config, 'num_input_channels', getattr(model.config, 'input_size', 1))
+            self.output_shape = (None, h, 1) # Assumes multi-to-one for metrics stability
+            self.input_shape = (None, lb, nf)
         else:
             # For custom models like CausalTransformer
-            self.output_shape = (None, model.forecast_horizon)
+            self.output_shape = (None, model.forecast_horizon, 1)
             self.input_shape = (None, model.lookback, model.n_features)
+        
+        # Add attributes often used by trainer/predictor
         self.name = "hf_model_wrapper"
+        self._is_hf = True
 
     def predict(self, dataset_or_array, verbose=0):
         import torch
@@ -387,8 +398,9 @@ class HFModelWrapper:
         self.model.eval()
         preds = []
         
-        # Check if it's a tf.data.Dataset
-        if hasattr(dataset_or_array, 'take'):
+        # Check if it's a tf.data.Dataset (NOT numpy - numpy also has .take!)
+        is_tf_dataset = hasattr(dataset_or_array, 'element_spec')  # Only tf.data.Dataset has this
+        if is_tf_dataset:
             for batch in dataset_or_array:
                 # batch is a tf tensor
                 xb = torch.tensor(batch.numpy(), dtype=torch.float32).to(device)
@@ -466,7 +478,7 @@ def load_hf_wrapper(model_path):
                 bin_path = os.path.join(model_path, "pytorch_model.bin")
                 if not os.path.exists(bin_path):
                     bin_path = os.path.join(os.path.dirname(model_path), "pytorch_model.bin")
-                state_dict = torch.load(bin_path, map_location='cpu')
+                state_dict = torch.load(bin_path, map_location='cpu', weights_only=True)
                 model.load_state_dict(state_dict)
             else:
                 raise e
@@ -504,7 +516,7 @@ def load_hf_wrapper(model_path):
         if not os.path.exists(bin_path):
             bin_path = os.path.join(os.path.dirname(model_path), "pytorch_model.bin")
         
-        state_dict = torch.load(bin_path, map_location='cpu')
+        state_dict = torch.load(bin_path, map_location='cpu', weights_only=True)
         model.load_state_dict(state_dict)
     
     # 2. Custom PyTorch models (CausalTransformer)
@@ -522,12 +534,13 @@ def load_hf_wrapper(model_path):
                 
         if checkpoint_path and meta_content:
             hp = meta_content.get('hyperparameters', {})
+            # Inherit robustly as well
             lookback = meta_content.get('lookback', hp.get('lookback', 336))
-            n_features = meta_content.get('n_features', 1)
-            horizon = meta_content.get('forecast_horizon', 24)
+            n_features = meta_content.get('n_features', hp.get('n_features', 1))
+            horizon = meta_content.get('forecast_horizon', hp.get('forecast_horizon', 24))
             
             model = build_causal_transformer_hf(lookback, n_features, horizon, hp)
-            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu'))
+            model.load_state_dict(torch.load(checkpoint_path, map_location='cpu', weights_only=True))
         else:
             raise ValueError(f"Missing checkpoint or metadata for CausalTransformer at {model_path}")
     else:
