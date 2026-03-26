@@ -2,7 +2,7 @@
 # src/lang.py - Labels for PV Forecasting Dashboard (English only)
 
 TR = {
-    'page_title': "PV Forecasting Pipeline",
+    'page_title': "Solar Forecasting Pipeline",
     'sidebar_settings': "Global Settings",
     'data_insights': "Data Insights",
     'data_prep': "Data Prep & Features",

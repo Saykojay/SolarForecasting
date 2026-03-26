@@ -1,7 +1,20 @@
+import streamlit as st
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+st.set_page_config(
+    page_title="Solar Forecasting Pipeline",
+    page_icon="☀️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
 """
 app.py - Streamlit Web Dashboard untuk PV Forecasting Pipeline
 Run: streamlit run app.py
 """
+
 import os
 import sys
 
@@ -43,7 +56,7 @@ import time
 import copy
 import numpy as np
 import pandas as pd
-import streamlit as st
+
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
@@ -89,15 +102,6 @@ def get_gpu_info():
 
 gpus_info = get_gpu_info()
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-st.set_page_config(
-    page_title="PV Forecasting Pipeline",
-    page_icon="",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 # ============================================================
 # CUSTOM CSS
@@ -561,14 +565,14 @@ with st.sidebar:
     
     # Actions
     st.markdown("---")
-    if st.button("Stop All Processes", width='stretch', type="secondary"):
+    if st.button("Stop All Processes", use_container_width=True, type="secondary"):
         import subprocess
         subprocess.run(['taskkill', '/F', '/IM', 'python.exe', '/FI', 'MEMUSAGE gt 500000'], 
                       capture_output=True, text=True)
         st.session_state.is_running = False
         st.warning("Processes stopped.")
     
-    if st.button("Save Config", width='stretch'):
+    if st.button("Save Config", use_container_width=True):
         save_config_to_file(cfg)
         st.success("Config saved.")
         st.cache_data.clear()
@@ -597,7 +601,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 with col1:
     status = "ready" if has_data else "missing"
     val_cls = "status-yes" if has_data else "status-no"
@@ -615,14 +619,6 @@ with col2:
         <span class="status-badge status-{status}">{gt('status_ready') if has_model else gt('status_missing')}</span>
     </div>""", unsafe_allow_html=True)
 with col3:
-    status = "ready" if has_target else "missing"
-    val_cls = "status-yes" if has_target else "status-no"
-    st.markdown(f"""<div class="metric-card">
-        <div class="metric-value {val_cls}">{"YES" if has_target else "NO"}</div>
-        <div class="metric-label">{gt('target_data')}</div>
-        <span class="status-badge status-{status}">{gt('status_present') if has_target else gt('status_missing')}</span>
-    </div>""", unsafe_allow_html=True)
-with col4:
     st.markdown(f"""<div class="metric-card">
         <div class="metric-value">{new_arch.upper()}</div>
         <div class="metric-label">{gt('active_arch')}</div>
@@ -681,32 +677,59 @@ with tab_prep_features:
         else:
             st.warning("Folder data/raw not found.")
 
+    # --- NEW SECTION: TARGET CONFIGURATION ---
+    with st.expander("Step 1: Target Variable & Physical Normalization", expanded=True):
+        st.markdown("##### Target Prediction Mode")
+        st.info("Tentukan variabel apa yang ingin diprediksi oleh model AI.")
+        
+        target_mode_options = ["Clear-Sky Index (CSI) - Recommended", "Raw PV Output (kW)"]
+        target_mode_idx = 0 if cfg['target'].get('use_csi', True) else 1
+        
+        target_selection = st.radio(
+            "Select Target Mode:",
+            target_mode_options,
+            index=target_mode_idx,
+            help="CSI menormalisasi cuaca ekstrem agar model lebih fokus pada pola awan. Raw PV memprediksi nilai kW langsung.",
+            key="target_mode_radio"
+        )
+        
+        use_csi = (target_selection == target_mode_options[0])
+        cfg['target']['use_csi'] = use_csi
+        
+        if use_csi:
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                cfg['target']['csi_ghi_threshold'] = st.number_input(
+                    "GHI Threshold for CSI (W/m²)", 
+                    value=cfg['target'].get('csi_ghi_threshold', 50),
+                    min_value=0, max_value=500, 
+                    help="Data di bawah GHI ini akan dianggap 0 (malam/gelap) untuk menghindari noise pembagian nol.",
+                    key="p_csi_th"
+                )
+            with cc2:
+                cfg['target']['csi_max'] = st.number_input(
+                    "CSI Max Clipping", 
+                    value=cfg['target'].get('csi_max', 1.2),
+                    min_value=1.0, max_value=2.0, step=0.1,
+                    help="Membatasi nilai CSI (biasanya max 1.2) untuk menghindari spike akibat refleksi awan yang tidak wajar.",
+                    key="p_csi_max"
+                )
+        else:
+            st.warning("⚠️ Memprediksi Raw PV Output (kW) secara langsung mungkin lebih sulit bagi model tanpa normalisasi cuaca.")
+
     # --- CONFIGURATION SECTION ---
-    with st.expander("Preprocessing & Features Configuration", expanded=not has_data):
+    with st.expander("Step 2: Preprocessing & Features Configuration", expanded=not has_data):
         c1, c2 = st.columns(2)
         with c1:
-            # --- CLEAR SEPARATION: TARGET SELECTION ---
-            st.markdown("##### 1. Target Variable (Prediction Output)")
-            st.info("Select the final output (Y) that the model will predict.")
-            use_csi = st.checkbox("Predict Clear-Sky Index (CSI Normalization)", 
-                                   value=cfg['target'].get('use_csi', True),
-                                   help="True: Predict CSI (radiation ratio). False: Predict power (kW) directly.",
-                                   key="p_csi")
-            cfg['target']['use_csi'] = use_csi
-            if use_csi:
-                cfg['target']['csi_ghi_threshold'] = st.number_input(
-                    "GHI Threshold (W/m²)", 
-                    value=cfg['target'].get('csi_ghi_threshold', 50),
-                    min_value=0, max_value=500, key="p_csi_th"
-                )
-
-            st.markdown("---")
             # --- CLEAR SEPARATION: INPUT FEATURES ---
-            st.markdown("##### 2. Historical Input Features (Past Data)")
-            st.caption("Select which historical metrics (X) are used by the model to forecast the target above.")
+            st.markdown("##### 1. Historical Input Features (Past Data)")
+            st.caption("Select which historical metrics (X) are used by the model to forecast the target.")
             g = cfg['features'].get('groups', {})
             # time features
-            with st.expander("Cyclical Time Features (Sin/Cos)", expanded=False):
+            st.markdown("---")
+            st.markdown("**Cyclical Time Features (Sin/Cos)**")
+            if True: # Simulating the block that was inside expander
+
                 g['time_hour'] = st.checkbox("Hourly (Hour Sin/Cos)", value=g.get('time_hour', True), 
                                             help="Captures daily patterns (morning-noon-night).", key="p_time_h")
                 g['time_day'] = st.checkbox("Daily (Day of Month Sin/Cos)", value=g.get('time_day', True), 
@@ -724,7 +747,7 @@ with tab_prep_features:
             cfg['features']['groups'] = g
             
             st.markdown("---")
-            st.markdown("##### Feature Selection Mode")
+            st.markdown("##### 2. Feature Selection Mode")
             sel_mode = st.radio(
                 "Feature Selection Mode",
                 ["auto", "manual"],
@@ -840,11 +863,6 @@ with tab_prep_features:
                                            min_value=1, max_value=168, step=1, key="p_hor")
                 cfg['forecasting']['horizon'] = horizon_p
                 
-                lookback_p = st.number_input("Lookback (hours)", value=cfg['model']['hyperparameters']['lookback'],
-                                             min_value=6, max_value=720, step=6, key="p_lookback",
-                                             help="Number of previous hours used as model input.")
-                cfg['model']['hyperparameters']['lookback'] = lookback_p
-                
                 scaler_options = ["minmax", "standard"]
                 current_scaler = cfg['features'].get('scaler_type', 'minmax').lower()
                 selected_scaler = st.selectbox("Scaling Method (Prep)", scaler_options,
@@ -933,19 +951,6 @@ with tab_prep_features:
 
             cfg['preprocessing'] = pcfg
 
-        st.markdown("---")
-        with st.expander("Dataset Mapping (Columns)"):
-            cfg['data']['csv_separator'] = st.text_input("CSV Separator", value=cfg['data']['csv_separator'])
-            cfg['data']['time_format'] = st.text_input("Time Format", value=cfg['data']['time_format'])
-            col_map = cfg['data']
-            col_map['time_col'] = st.text_input("Time Column", value=col_map.get('time_col', 'timestamp'))
-            col_map['target_col'] = st.text_input("Target Column (PV)", value=col_map.get('target_col', 'pv_output_kw'))
-            col_map['ghi_col'] = st.text_input("GHI Column", value=col_map.get('ghi_col', 'ghi_wm2'))
-            cfg['data'] = col_map
-            
-        if st.button("Save Preprocessing Config", key="save_prep_cfg"):
-            save_config_to_file(cfg)
-            st.success("Preprocessing config saved!")
 
     st.markdown("---")
     st.info(" **Pipeline**: Raw Data → Cleaning → Feature Engineering → Scaling → Sequencing")
@@ -968,6 +973,10 @@ with tab_prep_features:
         
         if prep_method == 'fixed':
             st.caption("This will generate .npy tensor files and scalers in data/processed.")
+            lookback_p = st.number_input("Lookback (hours)", value=cfg['model']['hyperparameters']['lookback'],
+                                         min_value=6, max_value=720, step=6, key="p_lookback_final",
+                                         help="Pilih ukuran window history data. Hanya diperlukan untuk mode Fixed Sequence.")
+            cfg['model']['hyperparameters']['lookback'] = lookback_p
         else:
             st.caption("This will only perform data cleaning, feature engineering, and scaling without sequence slicing. Saves disk space and is flexible.")
             
@@ -998,6 +1007,7 @@ with tab_prep_features:
                     metadata = run_preprocessing(cfg, version_name=v_name, method=prep_method)
                 st.session_state.prep_metadata = metadata
                 st.session_state.last_prep_log = stdout_capture.getvalue()
+                st.session_state.roll_corr_fig = None # Clear old chart
                 st.session_state.pipeline_log.append(
                     f"[{datetime.now():%H:%M:%S}] Preprocessing ({prep_method}) selesai. "
                     f"Features: {metadata['n_features']}"
@@ -1079,7 +1089,7 @@ with tab_data:
     with v_col2:
         st.write("") # padding
         st.write("") 
-        if st.button("Refresh Versions", width="stretch"):
+        if st.button("Refresh Versions", use_container_width=True):
             st.rerun()
 
     st.markdown("---")
@@ -1111,7 +1121,7 @@ with tab_data:
         fig_flow = px.area(flow_data, x='Stage', y='Rows', title="Data Pipeline Flow (Volume Retention)")
         fig_flow.update_layout(template="plotly_dark", height=300, 
                                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_flow, width='stretch')
+        st.plotly_chart(fig_flow, use_container_width=True)
 
         st.markdown("---")
         
@@ -1135,7 +1145,7 @@ with tab_data:
                                hole=0.4)
             fig_types.update_layout(template="plotly_dark", height=250, showlegend=False,
                                     margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig_types, width='stretch')
+            st.plotly_chart(fig_types, use_container_width=True)
             
             st.markdown(f"**Features Selected by Algorithm:** `{len(sel_f)}`")
             with st.expander("View Final Feature List"):
@@ -1143,138 +1153,122 @@ with tab_data:
                     st.markdown(f"{i+1}. `{f}`")
         
         with col_f2:
-            st.markdown("**Correlation Matrix (Selected Features)**")
-            corr = m['corr_matrix']
-            if corr is not None:
-                # Filter heatmap to focus on target correlation if too many features
-                fig_corr = go.Figure(data=go.Heatmap(
-                    z=corr.values,
-                    x=corr.columns,
-                    y=corr.index,
-                    colorscale='RdBu',
-                    zmin=-1, zmax=1
-                ))
-                fig_corr.update_layout(
-                    template="plotly_dark", height=450,
-                    margin=dict(t=30, b=30, l=30, r=30),
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                )
-                st.plotly_chart(fig_corr, width='stretch')
-            else:
-                st.info("Matriks korelasi tidak tersedia.")
-
-        st.markdown("---")
-        
-        # --- PHASE 2b: ROLLING CORRELATION ANALYSIS ---
-        st.markdown("#### Rolling Correlation Analysis")
-        st.caption("See how correlation values between target and other features change over data rows (timtu).")
-        
-        target_candidates = ['csi_target', 'pv_cs_normalized', 'pv_output_kw', cfg['data']['target_col']]
-        target_col_opts = [c for c in all_f if c in target_candidates]
-        if not target_col_opts:
-            target_col_opts = [all_f[-1]]
-            
-        c_r1, c_r2, c_r3 = st.columns([1, 2, 1])
-        with c_r1:
-            roll_target = st.selectbox("Target Feature (Y):", all_f, index=all_f.index(target_col_opts[0]), key="roll_target")
-        with c_r2:
-            default_feats = [f for f in sel_f if f != roll_target][:3]
-            if not default_feats:
-                default_feats = [f for f in all_f if f != roll_target][:3]
-            roll_features = st.multiselect("Bandingkan Korelasi dengan (X):", [f for f in all_f if f != roll_target], default=default_feats, key="roll_features")
-        with c_r3:
-            roll_window = st.number_input("Rolling Window Size", min_value=24, max_value=5000, value=720, step=24, help="Row count data (misal 720 jam = 30 hari) untuk 1 nilai korelasi.", key="roll_window")
-            
-        if roll_features:
-            train_feats_path = os.path.join(cfg['paths']['processed_dir'], 'df_train_feats.pkl')
-            if os.path.exists(train_feats_path):
-                if st.button("Generate Rolling Correlation Chart", type="primary"):
-                    with st.spinner("Menghitung rolling correlation sepanjang waktu..."):
-                        import numpy as np
-                        df_roll = safe_read_pickle(train_feats_path)
+            st.markdown("**Pearson Correlation Heatmap (Features ↔ Target)**")
+            # Try to load the feature table from disk
+            _feats_pkl = os.path.join(cfg['paths']['processed_dir'], 'df_train_feats.pkl')
+            _corr_loaded = False
+            if os.path.exists(_feats_pkl):
+                try:
+                    _df_corr = safe_read_pickle(_feats_pkl)
+                    # Only keep selected features + target columns that exist in df
+                    _target_col = None
+                    for _tc in ['csi_target', 'pv_output_kw', 'pv_output_dc_kw']:
+                        if _tc in _df_corr.columns:
+                            _target_col = _tc
+                            break
+                    _keep_cols = [f for f in sel_f if f in _df_corr.columns]
+                    if _target_col and _target_col not in _keep_cols:
+                        _keep_cols = [_target_col] + _keep_cols
+                    elif not _target_col and _keep_cols:
+                        _target_col = _keep_cols[0]
+                    
+                    if len(_keep_cols) >= 2:
+                        _df_sub = _df_corr[_keep_cols].dropna()
+                        _corr_matrix = _df_sub.corr(method='pearson')
                         
-                        fig_rc = go.Figure()
-                        x_axis = np.arange(len(df_roll))
-                        for f in roll_features:
-                            # Hitung korelasi
-                            rolling_corr = df_roll[roll_target].rolling(window=roll_window).corr(df_roll[f])
-                            fig_rc.add_trace(go.Scatter(
-                                x=x_axis, 
-                                y=rolling_corr, 
-                                mode='lines', 
-                                name=f"{f} vs {roll_target}",
-                                line=dict(width=2)
-                            ))
-                            
-                        # Add zero line
-                        fig_rc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
-                            
-                        fig_rc.update_layout(
+                        # Sort rows/cols by correlation to target (descending absolute value)
+                        if _target_col in _corr_matrix.columns:
+                            _sort_order = _corr_matrix[_target_col].abs().sort_values(ascending=True).index.tolist()
+                            _corr_sorted = _corr_matrix.loc[_sort_order, _sort_order]
+                        else:
+                            _corr_sorted = _corr_matrix
+                        
+                        # Build custom hover text: "x: ...\ny: ...\nr: ..."
+                        _z = _corr_sorted.values
+                        _labels_x = _corr_sorted.columns.tolist()
+                        _labels_y = _corr_sorted.index.tolist()
+                        _hover = [[
+                            f"x: {_labels_x[j]}<br>y: {_labels_y[i]}<br>r: {_z[i][j]:.4f}"
+                            for j in range(len(_labels_x))]
+                            for i in range(len(_labels_y))]
+                        
+                        import plotly.graph_objects as go
+                        _fig_corr = go.Figure(data=go.Heatmap(
+                            z=_z,
+                            x=_labels_x,
+                            y=_labels_y,
+                            text=_hover,
+                            hovertemplate="%{text}<extra></extra>",
+                            colorscale=[
+                                [0.0,  "#d73027"],
+                                [0.25, "#f46d43"],
+                                [0.45, "#fdae61"],
+                                [0.5,  "#f7f7f7"],
+                                [0.55, "#abd9e9"],
+                                [0.75, "#4575b4"],
+                                [1.0,  "#053061"],
+                            ],
+                            zmid=0,
+                            zmin=-1,
+                            zmax=1,
+                            colorbar=dict(
+                                thickness=12,
+                                len=0.9,
+                                tickfont=dict(color="#94a3b8", size=10),
+                                title=dict(text="r", font=dict(color="#94a3b8"))
+                            ),
+                        ))
+                        _n = len(_labels_x)
+                        _cell_size = max(16, min(32, 600 // _n))
+                        _fig_corr.update_layout(
                             template="plotly_dark",
-                            title=f"Perubahan Dinamis Korelasi (Window={roll_window} baris)",
-                            xaxis_title="Indeks Baris Data (Waktu)",
-                            yaxis_title="Nilai Korelasi (Pearson)",
-                            yaxis=dict(range=[-1.05, 1.05]),
-                            height=400,
-                            margin=dict(t=50, b=20, l=20, r=20),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=""),
-                            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                            paper_bgcolor="rgba(0,0,0,0)",
+                            plot_bgcolor="rgba(0,0,0,0)",
+                            height=max(350, _n * _cell_size + 80),
+                            margin=dict(t=10, b=80, l=120, r=20),
+                            xaxis=dict(
+                                tickfont=dict(size=9, color="#94a3b8"),
+                                tickangle=-45,
+                                side="bottom",
+                            ),
+                            yaxis=dict(
+                                tickfont=dict(size=9, color="#94a3b8"),
+                                autorange="reversed",
+                            ),
                         )
-                        st.plotly_chart(fig_rc, width="stretch")
-            else:
-                st.warning("File `df_train_feats.pkl` not found in processed folder. Re-run preprocessing.")
-        else:
-            st.info("Select at least 1 feature to compare.")
+                        st.plotly_chart(_fig_corr, use_container_width=True)
+                        st.caption(
+                            f"Pearson r antara {len(_keep_cols)} fitur yang dipilih. "
+                            f"Hover sel untuk melihat nilai r persis. "
+                            f"Merah = korelasi negatif kuat, Biru = positif kuat."
+                        )
+                        _corr_loaded = True
+                    else:
+                        st.warning("Tidak cukup kolom untuk membuat heatmap korelasi.")
+                except Exception as _e:
+                    st.error(f"Gagal membuat heatmap korelasi: {_e}")
             
+            if not _corr_loaded and not os.path.exists(_feats_pkl):
+                st.info("Jalankan Preprocessing terlebih dahulu untuk melihat heatmap korelasi Pearson.")
+
         st.markdown("---")
         
         # --- PHASE 3: DATA SPLITTING & SEQUENCING ---
         st.markdown("#### Phase 3: Dataset Splitting & Scaling")
         
-        c1, c2 = st.columns(2)
-        with c1:
-            split_data = pd.DataFrame({
-                'Set': ['Training', 'Validation'],
-                'Sequences': [stats['train_final'], stats['test_final']]
-            })
-            fig_split = px.bar(split_data, x='Set', y='Sequences', color='Set',
-                               color_discrete_map={'Training': '#818cf8', 'Validation': '#555555'})
-            fig_split.update_layout(template="plotly_dark", height=300, showlegend=False,
-                                    title="Train/Val Distribution")
-            st.plotly_chart(fig_split, width='stretch')
-            
-        with c2:
-            st.markdown("**Input Template (Sequence Sample)**")
-            
-            # Check if X_train is in memory
-            if 'X_train' in m and m['X_train'] is not None:
-                xt = m['X_train']
-                if xt.ndim == 3: # Mode FIXED
-                    seq_sample = xt[0]
-                    df_seq = pd.DataFrame(seq_sample, columns=sel_f)
-                    st.dataframe(df_seq.head(10), width='stretch')
-                    st.caption(f"Showing first 10 timesteps of sequence #0 (3D Tensor: {xt.shape})")
-                else: # Mode AGNOSTIC (2D)
-                    df_seq = pd.DataFrame(xt[:10], columns=sel_f)
-                    st.dataframe(df_seq, width='stretch')
-                    st.caption(f"Showing first 10 rows of clean feature table (2D Table: {xt.shape})")
-            else:
-                # Offer to load X_train.npy if it exists in the active folder
-                x_train_path = os.path.join(cfg['paths']['processed_dir'], 'X_train.npy')
-                if os.path.exists(x_train_path):
-                    st.info("Preview tensor tidak di memori (Mode Hemat RAM).")
-                    if st.button("Load Sequence Preview"):
-                        try:
-                            # Load into the metadata dictionary
-                            m['X_train'] = np.load(x_train_path)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Gagal memuat preview: {e}")
-                else:
-                    st.info("Tensor preview not available for this version.")
+        # Display the distribution chart
+        split_data = pd.DataFrame({
+            'Set': ['Training', 'Validation'],
+            'Sequences': [stats['train_final'], stats['test_final']]
+        })
+        fig_split = px.bar(split_data, x='Set', y='Sequences', color='Set',
+                            color_discrete_map={'Training': '#818cf8', 'Validation': '#555555'})
+        fig_split.update_layout(template="plotly_dark", height=350, showlegend=False,
+                                title="Train/Val Distribution")
+        st.plotly_chart(fig_split, use_container_width=True)
+        st.caption("Distribusi data training dan validasi (sequences/baris) berdasarkan splitting method yang dipilih.")
     else:
         st.info("No preprocessing data. Run 'Step 1: Preprocessing' in the Runner tab.")
-
 
 # --- TAB: TRAINING CENTER ---
 with tab_train:
@@ -1487,9 +1481,10 @@ with tab_train:
                 _is_patch = new_arch in ["patchtst", "patchtst_hf", "timetracker", "timeperceiver"]
                 _is_autoformer = new_arch in ["autoformer", "autoformer_hf"]
                 
-                exp_title = f" {new_arch.upper()} Configuration" if not _is_patch else "Patch-Based Specific Params"
-                
-                with st.expander(exp_title, expanded=True):
+                st.markdown("---")
+                st.markdown(f"**{exp_title}**")
+                if True: # Simulating the block
+
                     # 1. Patching (Only for models that support Patching)
                     if _is_patch:
                         hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2, key=f"hp_pl_{new_arch}")
@@ -1505,7 +1500,10 @@ with tab_train:
                     hp['n_heads'] = st.selectbox("n_heads (Attention Heads)", _nheads_opts, index=_nheads_opts.index(hp.get('n_heads', 16)), key=f"hp_nh_{new_arch}")
             
             elif new_arch == "timetracker":
-                with st.expander("TimeTracker Specific Params", expanded=True):
+                st.markdown("---")
+                st.markdown("**TimeTracker Specific Params**")
+                if True:
+
                     hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
                     hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
                     _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 8)]))
@@ -1517,7 +1515,10 @@ with tab_train:
                     hp['top_k'] = st.number_input("Top-K Routing", value=hp.get('top_k', 2), min_value=1, max_value=hp['n_private_experts'], help="How many private experts are active per token")
 
             elif new_arch == "timeperceiver":
-                with st.expander("TimePerceiver Specific Params", expanded=True):
+                st.markdown("---")
+                st.markdown("**TimePerceiver Specific Params**")
+                if True:
+
                     hp['patch_len'] = st.number_input("patch_len (P)", value=hp.get('patch_len', 16), min_value=2, step=2)
                     hp['stride'] = st.number_input("stride (S)", value=hp.get('stride', 8), min_value=1, step=1)
                     _nheads_opts = sorted(set([1, 2, 4, 8, 12, 16] + [hp.get('n_heads', 8)]))
@@ -1525,7 +1526,10 @@ with tab_train:
                     hp['n_latent_tokens'] = st.number_input("Latent Tokens (M)", value=hp.get('n_latent_tokens', 32), min_value=4, max_value=256, step=4, help="Ukuran bottleneck (M) untuk attention laten")
             
             elif new_arch in ["gru", "lstm", "rnn"]:
-                with st.expander(f" {new_arch.upper()} Specific Params", expanded=True):
+                st.markdown("---")
+                st.markdown(f"**{new_arch.upper()} Specific Params**")
+                if True:
+
                     st.info(f"Input 'Hidden Units' di atas menentukan kapasitas memori per {new_arch.upper()} cell.")
                     hp['use_bidirectional'] = st.checkbox("Use Bidirectional", value=hp.get('use_bidirectional', True), key=f"bi_{new_arch}")
                     hp['use_revin'] = st.checkbox("Use RevIN (Reversible Instance Normalization)", value=hp.get('use_revin', False), key=f"revin_{new_arch}")
@@ -1544,7 +1548,7 @@ with tab_train:
             m_name_train = st.text_input("Nama Model (ID)", placeholder="misal: patchtst_v1_exp1", key="m_name_train")
         with c2:
             st.write("") # mapping
-            st.button("Start Model Training", type="primary", width="stretch", disabled=not has_data, on_click=_set_action, args=("action_run_train",))
+            st.button("Start Model Training", type="primary", use_container_width=True, disabled=not has_data, on_click=_set_action, args=("action_run_train",))
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col_ctrl2:
@@ -1614,7 +1618,7 @@ with tab_train:
                         fig.add_trace(go.Scatter(x=epochs_list, y=[d['loss'] for d in self.epoch_data], name='Train', line=dict(color='#818cf8', width=2)))
                         fig.add_trace(go.Scatter(x=epochs_list, y=[d['val_loss'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6', width=2)))
                         fig.update_layout(template="plotly_dark", height=350, margin=dict(t=20, b=20), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                        chart_placeholder.plotly_chart(fig, width="stretch")
+                        chart_placeholder.plotly_chart(fig, use_container_width=True)
                         lr_display.caption(f"LR: {current_lr:.8f} | Best Val: {min(d['val_loss'] for d in self.epoch_data):.6f}")
                         
                         # Fix: Add explicit print to CMD so user can see progress there too
@@ -1668,7 +1672,7 @@ with tab_train:
             fig_l.add_trace(go.Scatter(y=hist['loss'], name='Train', line=dict(color='#818cf8')))
             fig_l.add_trace(go.Scatter(y=hist['val_loss'], name='Val', line=dict(color='#f472b6')))
             fig_l.update_layout(template="plotly_dark", height=350, title="Final Loss Curves", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig_l, width="stretch")
+            st.plotly_chart(fig_l, use_container_width=True)
         with c2:
             st.metric("Best Val Loss", f"{min(hist['val_loss']):.6f}")
             st.metric("Total Epochs", len(hist['loss']))
@@ -1685,7 +1689,7 @@ with tab_train:
     st.markdown("---")
     st.markdown("### Time Series Cross-Validation (TSCV)")
     st.caption("Test model stability across different time segments.")
-    run_tscv = st.button("Run TSCV Evaluation", width='stretch', key="btn_tscv_tab")
+    run_tscv = st.button("Run TSCV Evaluation", use_container_width=True, key="btn_tscv_tab")
     
     if run_tscv:
         with st.spinner("Running TSCV..."):
@@ -1841,7 +1845,7 @@ with tab_batch:
                 q_feat['physics'] = st.checkbox("Physics (CS Index)", value=q_feat.get('physics', False), key="q_f_p")
                 q_feat_mode = st.selectbox("Selection Mode", ["auto", "manual"], key="q_f_mode")
 
-            if st.button(gt('add_to_queue'), width="stretch", key="btn_add_batch_queue", disabled=st.session_state.batch_running):
+            if st.button(gt('add_to_queue'), use_container_width=True, key="btn_add_batch_queue", disabled=st.session_state.batch_running):
                 st.session_state.batch_queue.append({
                     "name": q_name,
                     "architecture": q_arch_val,
@@ -1874,7 +1878,7 @@ with tab_batch:
                         st.rerun()
                 
                 st.markdown("---")
-                st.button(gt('run_batch_btn'), type="primary", width="stretch", disabled=st.session_state.batch_running, on_click=_set_action, args=("action_run_batch",))
+                st.button(gt('run_batch_btn'), type="primary", use_container_width=True, disabled=st.session_state.batch_running, on_click=_set_action, args=("action_run_batch",))
                 if st.session_state.get("action_run_batch"):
                     st.session_state.action_run_batch = False
                     st.session_state.batch_running = True
@@ -1948,7 +1952,7 @@ with tab_batch:
                                 fig.add_trace(go.Scatter(x=ee, y=[d['v'] for d in self.epoch_data], name='Val', line=dict(color='#f472b6')))
                                 fig.update_layout(template="plotly_dark", height=300, margin=dict(l=20,r=20,t=30,b=20),
                                                   title=f"Loss Curve: {item['name']}", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                                m_chart.plotly_chart(fig, width="stretch")
+                                m_chart.plotly_chart(fig, use_container_width=True)
 
                         try:
                             from src.trainer import train_model
@@ -1973,7 +1977,7 @@ with tab_batch:
                 st.markdown("---")
                 st.markdown("#### Results Summary")
                 res_df = pd.DataFrame(st.session_state.batch_results)
-                st.dataframe(res_df, width="stretch")
+                st.dataframe(res_df, use_container_width=True)
                 if st.button("Clear Results"):
                     st.session_state.batch_results = []
                     st.rerun()
@@ -2342,7 +2346,7 @@ with tab_tuning:
                 b_max = st.number_input("Batch Max", b_min, 512, b_vals[1], 2, key="b_max_new")
                 space['batch_size'] = [b_min, b_max]
 
-            if st.button("Save Search Space to Master Config", width="stretch", key="save_ss_tuning"):
+            if st.button("Save Search Space to Master Config", use_container_width=True, key="save_ss_tuning"):
                 cfg['tuning']['search_space'] = space
                 cfg['tuning']['n_trials'] = n_trials_input
                 save_config_to_file(cfg)
@@ -2358,7 +2362,7 @@ with tab_tuning:
             _opt_loss = ['mse', 'huber', 'mae']
             tune_loss_fn = st.selectbox("Loss Function", _opt_loss, index=_opt_loss.index(cfg['model']['hyperparameters'].get('loss_fn', 'mse')) if cfg['model']['hyperparameters'].get('loss_fn') in _opt_loss else 0, key="tune_loss_fn_top")
         with tune_col_dev2:
-            st.button("Run New Optuna Tuning", type="primary", width="stretch", 
+            st.button("Run New Optuna Tuning", type="primary", use_container_width=True, 
                                   disabled=not has_data, key="btn_tune_execute", on_click=_set_action, args=("action_run_tune",))
     else:
         st.warning(" **Optuna Tuning is not active**. Enable it via the 'Enable Optuna Tuning' toggle in the sidebar.")
@@ -2414,7 +2418,7 @@ with tab_tuning:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 height=400,
             )
-            st.plotly_chart(fig_opt, width='stretch')
+            st.plotly_chart(fig_opt, use_container_width=True)
         
         with col2:
             # Param Importance (bar chart of how often best value appeared)
@@ -2436,7 +2440,7 @@ with tab_tuning:
                     plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                     height=400,
                 )
-                st.plotly_chart(fig_param, width='stretch')
+                st.plotly_chart(fig_param, use_container_width=True)
         
         # Trial Details Table  
         st.markdown("#### Trial Details")
@@ -2444,7 +2448,7 @@ with tab_tuning:
             {'Trial': i+1, 'Value': t['value'], **t['params']}
             for i, t in enumerate(trials)
         ]).sort_values('Value')
-        st.dataframe(df_trials, width='stretch', hide_index=True)
+        st.dataframe(df_trials, use_container_width=True)
         
     else:
         st.info("No tuning results saved yet.")
@@ -2499,11 +2503,11 @@ with tab_tuning:
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(y=self.history, mode='lines+markers', name='Trial Value'))
                         fig.update_layout(height=250, margin=dict(t=10, b=10), template="plotly_dark")
-                        tune_chart_placeholder.plotly_chart(fig, width='stretch')
+                        tune_chart_placeholder.plotly_chart(fig, use_container_width=True)
 
                         # Live Table (Show latest on top)
                         df_live = pd.DataFrame(self.trial_records).sort_values('Trial', ascending=False)
-                        table_placeholder.dataframe(df_live, height=300, hide_index=True)
+                        table_placeholder.dataframe(df_live, height=300)
 
             live_monitor = TuningLiveMonitor(cfg['tuning']['n_trials'])
             
@@ -2610,7 +2614,10 @@ with tab_eval:
                     """, unsafe_allow_html=True)
                     
                     if 'hyperparameters' in m_meta:
-                        with st.expander("View Hyperparameters"):
+                        st.markdown("---")
+                        st.markdown("**View Hyperparameters**")
+                        if True:
+
                             hp = m_meta['hyperparameters']
                             cols = st.columns(3)
                             for i, (k, v) in enumerate(hp.items()):
@@ -2625,7 +2632,7 @@ with tab_eval:
                         help="Default (Unchecked): Model is evaluated using its original training data. Check this to test the model on a new/different dataset being prepared."
                     )
                 
-                st.button("Run Evaluation for Selected Model", type="primary", width="stretch", key="btn_eval_tab", on_click=_set_action, args=("action_run_eval",))
+                st.button("Run Evaluation for Selected Model", type="primary", use_container_width=True, key="btn_eval_tab", on_click=_set_action, args=("action_run_eval",))
                 if st.session_state.get("action_run_eval"):
                     st.session_state.action_run_eval = False
                     with st.spinner(f"Evaluating model: {model_to_eval}..."):
@@ -2879,7 +2886,7 @@ with tab_eval:
                                     f"{m_test_prod.get('r2', 0):.4f}"])
         
         df_metrics = pd.DataFrame(metrics_rows, columns=['Metrik', 'Train', 'Test'])
-        st.dataframe(df_metrics, width='stretch', hide_index=True)
+        st.dataframe(df_metrics, use_container_width=True)
         
         # ====== Prepare common data ======
         if 'pv_test_actual' in results:
@@ -2915,7 +2922,7 @@ with tab_eval:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 height=450,
             )
-            st.plotly_chart(fig_scatter, width='stretch')
+            st.plotly_chart(fig_scatter, use_container_width=True)
         
         with col2:
             residuals = actual_flat[mask_productive] - pred_flat[mask_productive]
@@ -2931,7 +2938,7 @@ with tab_eval:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 height=450,
             )
-            st.plotly_chart(fig_hist, width='stretch')
+            st.plotly_chart(fig_hist, use_container_width=True)
         
         # ====== ROW 4: Time Series Sample ======
         st.markdown("#### Time Series: Actual vs Predicted (Sample)")
@@ -2978,7 +2985,7 @@ with tab_eval:
                 height=400,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             )
-            st.plotly_chart(fig_ts, width='stretch')
+            st.plotly_chart(fig_ts, use_container_width=True)
         except Exception as e:
             st.caption(f"Time series plot not available: {e}")
         
@@ -3010,7 +3017,7 @@ with tab_eval:
                 height=400,
                 yaxis=dict(range=[min(min(r2_vals) - 0.05, -0.1), 1.0]),
             )
-            st.plotly_chart(fig_r2_step, width='stretch')
+            st.plotly_chart(fig_r2_step, use_container_width=True)
         else:
             st.info("Per-step R2 diagnostics not available. Re-run evaluation.")
         
@@ -3047,7 +3054,7 @@ with tab_eval:
                     height=400, barmode='group',
                     xaxis=dict(dtick=1),
                 )
-                st.plotly_chart(fig_hourly, width='stretch')
+                st.plotly_chart(fig_hourly, use_container_width=True)
             
             with col2:
                 # Color-code R2 bars: green if good, red if bad
@@ -3069,7 +3076,7 @@ with tab_eval:
                     height=400,
                     xaxis=dict(dtick=1),
                 )
-                st.plotly_chart(fig_r2h, width='stretch')
+                st.plotly_chart(fig_r2h, use_container_width=True)
             
             # Hourly metrics table
             with st.expander("Full Hourly Table", expanded=False):
@@ -3083,7 +3090,7 @@ with tab_eval:
                         'R2': f"{m.get('r2', 0):.4f}",
                         'N Samples': m.get('count', 0),
                     })
-                st.dataframe(pd.DataFrame(tbl_data), hide_index=True, width='stretch')
+                st.dataframe(pd.DataFrame(tbl_data), use_container_width=True)
         else:
             # Fallback to old method
             try:
@@ -3095,7 +3102,7 @@ with tab_eval:
                 hourly_stats = df_hourly.groupby('Hour')['MAE'].agg(['mean', 'std']).reset_index()
                 fig_hour = go.Figure(go.Bar(x=hourly_stats['Hour'], y=hourly_stats['mean'], marker_color='#818cf8'))
                 fig_hour.update_layout(title="MAE by Hour (h+1)", xaxis_title="Hour", yaxis_title="MAE (kW)", template="plotly_dark", height=400)
-                st.plotly_chart(fig_hour, width='stretch')
+                st.plotly_chart(fig_hour, use_container_width=True)
             except Exception as e:
                 st.caption(f"Hourly error chart not available: {e}")
         
@@ -3121,7 +3128,7 @@ with tab_eval:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 height=400,
             )
-            st.plotly_chart(fig_dist, width='stretch')
+            st.plotly_chart(fig_dist, use_container_width=True)
         
         with col2:
             # QQ-like: sorted actual vs sorted predicted  
@@ -3147,7 +3154,7 @@ with tab_eval:
                 plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
                 height=400,
             )
-            st.plotly_chart(fig_qq, width='stretch')
+            st.plotly_chart(fig_qq, use_container_width=True)
         
         # ====== DOWNLOAD ======
         st.markdown("---")
@@ -3160,8 +3167,7 @@ with tab_eval:
                 data=csv_metrics,
                 file_name="evaluation_metrics.csv",
                 mime="text/csv",
-                width='stretch',
-            )
+                use_container_width=True,            )
         with col2:
             df_preds = pd.DataFrame({
                 'actual': actual_flat,
@@ -3174,8 +3180,7 @@ with tab_eval:
                 data=csv_preds,
                 file_name="test_predictions.csv",
                 mime="text/csv",
-                width='stretch',
-            )
+                use_container_width=True,            )
     else:
         st.info("No evaluation results yet. Run Evaluate or Full Pipeline first.")
 
@@ -3514,7 +3519,7 @@ with tab_transfer:
                             df_f = pd.DataFrame(eval_data['fold_results'])
                             st.dataframe(df_f.style.format({
                                 'mae': '{:.4f}', 'rmse': '{:.4f}', 'r2': '{:.4f}', 'nmae': '{:.2f}%'
-                            }).background_gradient(cmap='YlGnBu_r', subset=['mae', 'rmse']), width='stretch')
+                            }).background_gradient(cmap='YlGnBu_r', subset=['mae', 'rmse']), use_container_width=True)
                             
                             fig_t = go.Figure()
                             fig_t.add_trace(go.Bar(x=df_f['fold'], y=df_f['mae'], name="MAE (Fold)", marker_color='#2196F3'))
@@ -3531,7 +3536,7 @@ with tab_transfer:
                     # --- NEW: EXPORT ---
                     with st.expander("Export & Data Details"):
                         st.info(f"Showing data for prediction step **T+{selected_step}**")
-                        st.dataframe(df_res.head(100), width='stretch')
+                        st.dataframe(df_res.head(100), use_container_width=True)
                         
                         # Export button
                         try:
@@ -3668,8 +3673,9 @@ with tab_transfer:
                                 total_layers = len(layer_names)
                                 st.markdown(f"**Struktur Model (Keras):** `{m_id}` memiliki **{total_layers}** total layers.")
                             
-                            with st.expander("Intip Daftar Layer (Layer Browser)", expanded=False):
-                                st.code("\n".join(layer_names), language="text")
+                            st.markdown("---")
+                            st.markdown("**Daftar Layer (Layer Browser)**")
+                            st.code("\n".join(layer_names), language="text")
                             
                             c_f1, c_f2 = st.columns(2)
                             with c_f1:
@@ -3678,8 +3684,8 @@ with tab_transfer:
                                 ft_lr = st.number_input("Learning Rate", min_value=0.000001, max_value=0.1, value=current_lr*0.1, format="%.6f", key="ft_lr_input")
                             
                             with c_f2:
-                                ft_reset_weights = st.toggle("Train from Scratch (Reset Weights)", value=False, help="Ignore pre-trained weights, initialize new weights from scratch with the exact same architecture on this target data.", key="ft_reset_weights_check")
-                                ft_freeze = st.toggle("Enable Layer Freezing", value=True, help="Freeze early layers to preserve pretrained knowledge.", key="ft_freeze_check", disabled=ft_reset_weights)
+                                ft_reset_weights = st.checkbox("Train from Scratch (Reset Weights)", value=False, help="Ignore pre-trained weights, initialize new weights from scratch with the exact same architecture on this target data.", key="ft_reset_weights_check")
+                                ft_freeze = st.checkbox("Enable Layer Freezing", value=True, help="Freeze early layers to preserve pretrained knowledge.", key="ft_freeze_check", disabled=ft_reset_weights)
                                 
                                 if ft_reset_weights:
                                     ft_last_n = total_layers
@@ -3711,7 +3717,7 @@ with tab_transfer:
                                 ft_epochs = st.number_input("Epochs", 1, 100, 10, key="ft_err_e")
                                 ft_lr = st.number_input("Learning Rate", 0.000001, 0.1, 0.0001, format="%.6f", key="ft_err_lr")
                             with c_err2:
-                                ft_freeze = st.toggle("Freeze Backbone", True, key="ft_err_frz")
+                                ft_freeze = st.checkbox("Freeze Backbone", True, key="ft_err_frz")
                                 ft_last_n = st.number_input("Last N Layers Trainable", 1, 50, 2, key="ft_err_n")
 
                     if st.button("Start Fine-Tuning on Target Data", 
@@ -3842,8 +3848,9 @@ with tab_transfer:
                                 best_pt = df_sweep.loc[df_sweep['r2'].idxmax()]
                                 st.success(f" **Rekomendasi**: Unfreeze **{best_pt['trainable_layers']:.0f} layers** (R2={best_pt['r2']:.4f}).")
                                 
-                                with st.expander("View Sweep Results Table"):
-                                    st.table(df_sweep)
+                                st.markdown("---")
+                                st.markdown("**Sweep Results Table**")
+                                st.table(df_sweep)
                         except Exception as e_sweep:
                             st.error(f"Sweep Error: {e_sweep}")
 
@@ -4195,7 +4202,7 @@ with tab_compare:
                 if err_cols:
                     styled_df = styled_df.apply(highlight_min, subset=err_cols)
                 
-                st.dataframe(styled_df, width="stretch")
+                st.dataframe(styled_df, use_container_width=True)
                 
                 # --- EXPORT TO EXCEL/CSV BUTTON ---
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -4233,13 +4240,13 @@ with tab_compare:
                                    title="R2 Score (Higher is Better)",
                                    color_continuous_scale='Viridis')
                     fig_r2.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_r2, width="stretch")
+                    st.plotly_chart(fig_r2, use_container_width=True)
                 with c2:
                     fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='MAE',
                                     title="MAE Score (Lower is Better)",
                                     color_continuous_scale='Reds_r')
                     fig_mae.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_mae, width="stretch")
+                    st.plotly_chart(fig_mae, use_container_width=True)
                 
                 # Second Row: Inference Time and Overfitting Delta
                 c3, c4 = st.columns(2)
@@ -4248,13 +4255,13 @@ with tab_compare:
                                     title="Inference Time per sample (Lower is Faster)",
                                     color_continuous_scale='Oranges')
                     fig_time.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_time, width="stretch")
+                    st.plotly_chart(fig_time, use_container_width=True)
                 with c4:
                     fig_rmse = px.bar(df_comp, x='Model ID', y='RMSE', color='RMSE',
                                     title="RMSE (Lower is Safer/Better)",
                                     color_continuous_scale='Purples_r')
                     fig_rmse.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig_rmse, width="stretch")
+                    st.plotly_chart(fig_rmse, use_container_width=True)
                 
                 
                 # Trade-off: Inference Time vs nRMSE
@@ -4307,7 +4314,7 @@ with tab_compare:
                     paper_bgcolor='rgba(0,0,0,0)',
                     height=500
                 )
-                st.plotly_chart(fig_radar, width="stretch")
+                st.plotly_chart(fig_radar, use_container_width=True)
         else:
             st.warning("No saved models in `models/` folder.")
     else:
