@@ -1284,13 +1284,12 @@ with tab_train:
                            and os.path.exists(os.path.join(proc_dir, f, 'prep_summary.json'))]
             all_versions = sorted(all_versions, reverse=True)
             
-            # Annotate which ones have tensors ready (X_train.npy)
             def _train_label(x):
                 if x == "Latest (Default)":
                     return x
                 has_tensors = os.path.exists(os.path.join(proc_dir, x, 'X_train.npy'))
                 base = label_format_with_time(x, proc_dir)
-                return base if has_tensors else f"⚠️ {base} [Agnostic - perlu Fixed Sequence]"
+                return base if has_tensors else f"{base} ⚡"
             
             options = ["Latest (Default)"] + all_versions
             
@@ -1312,14 +1311,15 @@ with tab_train:
             
             # Check if this version is actually valid (has npy files)
             is_valid = os.path.exists(os.path.join(active_proc_dir, 'X_train.npy'))
+            folder_name = os.path.basename(active_proc_dir) if active_proc_dir != proc_dir else 'processed (latest)'
             if is_valid:
-                st.caption(f"Folder Active: `{os.path.basename(active_proc_dir)}` ✅")
+                st.caption(f"Folder Active: `{folder_name}` ✅ Tensor Ready")
             else:
-                st.info(
-                    f"ℹ️ Folder **`{os.path.basename(active_proc_dir)}`** dibuat dengan mode **Lookback Agnostic**. "
-                    f"Sistem akan otomatis membuat sequens menggunakan **Lookback = {hp.get('lookback', 72)} jam** "
-                    f"(dari konfigurasi di bawah) saat training dimulai."
-                )
+                has_pkl = os.path.exists(os.path.join(active_proc_dir, 'df_train_feats.pkl'))
+                if has_pkl:
+                    st.caption(f"Folder Active: `{folder_name}` ⚡ Agnostic Mode — sequens dibuat otomatis saat training")
+                else:
+                    st.error(f"Folder `{folder_name}` tidak memiliki data apapun. Jalankan Preprocessing terlebih dahulu.")
         else:
             st.warning("Processed folder not found. Run Preprocessing first.")
 
