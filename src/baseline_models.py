@@ -64,7 +64,7 @@ def evaluate_ml_baseline(model_type, X_train, y_train, X_test, y_test, y_scaler=
     return {
         'model': model_type,
         'train_time': train_time,
-        'metrics': {'R²': r2, 'MAE': mae, 'RMSE': rmse},
+        'metrics': {'R2': r2, 'MAE': mae, 'RMSE': rmse},
         'y_pred': y_pred,
         'y_actual': y_actual
     }
@@ -170,7 +170,7 @@ def evaluate_physics_baseline(model_type, df_test, capacity_kw=None):
     return {
         'model': model_type,
         'train_time': 0, # Physics models don't "train"
-        'metrics': {'R²': r2, 'MAE': mae, 'RMSE': rmse},
+        'metrics': {'R2': r2, 'MAE': mae, 'RMSE': rmse},
         'y_pred': pred_power,
         'y_actual': y_actual
     }
