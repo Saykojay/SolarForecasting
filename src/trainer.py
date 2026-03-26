@@ -48,18 +48,95 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     # Load data jika belum di-pass
     if data is None:
+        import sys
         proc = cfg['paths']['processed_dir']
         print(f"📂 Loading data from {proc}...")
-        import sys
         sys.stdout.flush()
         
-        data = {
-            'X_train': np.load(os.path.join(proc, 'X_train.npy')),
-            'y_train': np.load(os.path.join(proc, 'y_train.npy')),
-            'X_test': np.load(os.path.join(proc, 'X_test.npy')),
-            'y_test': np.load(os.path.join(proc, 'y_test.npy')),
-            'n_features': None,  # akan dideteksi dari shape
-        }
+        x_train_path = os.path.join(proc, 'X_train.npy')
+        
+        if os.path.exists(x_train_path):
+            # --- Standard Mode: Load pre-built tensor files ---
+            data = {
+                'X_train': np.load(x_train_path),
+                'y_train': np.load(os.path.join(proc, 'y_train.npy')),
+                'X_test': np.load(os.path.join(proc, 'X_test.npy')),
+                'y_test': np.load(os.path.join(proc, 'y_test.npy')),
+                'n_features': None,
+            }
+        else:
+            # --- Agnostic Fallback: Build sequences on-the-fly from pkl files ---
+            print("⚡ X_train.npy not found. Generating sequences on-the-fly from Agnostic dataset...")
+            sys.stdout.flush()
+            
+            pkl_train = os.path.join(proc, 'df_train_feats.pkl')
+            pkl_test  = os.path.join(proc, 'df_test_feats.pkl')
+            summary_path = os.path.join(proc, 'prep_summary.json')
+            
+            if not os.path.exists(pkl_train):
+                raise FileNotFoundError(
+                    f"Data not found in {proc}. "
+                    "No X_train.npy and no df_train_feats.pkl. Run Preprocessing first."
+                )
+            
+            from src.predictor import safe_read_pickle
+            from src.data_prep import create_sequences_with_indices
+            
+            df_train = safe_read_pickle(pkl_train)
+            df_test  = safe_read_pickle(pkl_test)
+            
+            # Determine selected features & target from prep_summary.json
+            selected_features, act_target = None, None
+            if os.path.exists(summary_path):
+                with open(summary_path, 'r') as f:
+                    summary = json.load(f)
+                selected_features = summary.get('selected_features', None)
+                act_target = summary.get('target_col', None)
+            
+            if selected_features is None:
+                raise ValueError("Cannot determine feature list. prep_summary.json missing or malformed.")
+            if act_target is None:
+                act_target = cfg['data']['target_col']
+            
+            print(f"   Features: {selected_features}")
+            print(f"   Target:   {act_target}")
+            print(f"   Lookback: {lookback}  |  Horizon: {horizon}")
+            
+            # Re-apply scalers (use saved ones from proc dir)
+            x_scaler_path = os.path.join(proc, 'X_scaler.pkl')
+            y_scaler_path = os.path.join(proc, 'y_scaler.pkl')
+            
+            if os.path.exists(x_scaler_path) and os.path.exists(y_scaler_path):
+                X_scaler = joblib.load(x_scaler_path)
+                y_scaler = joblib.load(y_scaler_path)
+                X_train_scaled = X_scaler.transform(df_train[selected_features])
+                y_train_scaled = y_scaler.transform(df_train[[act_target]]).flatten()
+                X_test_scaled  = X_scaler.transform(df_test[selected_features])
+                y_test_scaled  = y_scaler.transform(df_test[[act_target]]).flatten()
+            else:
+                # Fallback: fit scalers from scratch
+                from sklearn.preprocessing import MinMaxScaler
+                X_scaler = MinMaxScaler()
+                y_scaler = MinMaxScaler()
+                X_train_scaled = X_scaler.fit_transform(df_train[selected_features])
+                y_train_scaled = y_scaler.fit_transform(df_train[[act_target]]).flatten()
+                X_test_scaled  = X_scaler.transform(df_test[selected_features])
+                y_test_scaled  = y_scaler.transform(df_test[[act_target]]).flatten()
+            
+            # Create sequences
+            X_tr, y_tr, _ = create_sequences_with_indices(X_train_scaled, y_train_scaled, df_train.index, lookback, horizon)
+            X_te, y_te, _ = create_sequences_with_indices(X_test_scaled,  y_test_scaled,  df_test.index,  lookback, horizon)
+            
+            print(f"   ✅ Sequences created: X_train={X_tr.shape}, X_test={X_te.shape}")
+            
+            data = {
+                'X_train': X_tr,
+                'y_train': y_tr,
+                'X_test':  X_te,
+                'y_test':  y_te,
+                'n_features': X_tr.shape[2],
+            }
+
     
     print(f"📊 Data shapes: X={data['X_train'].shape}, y={data['y_train'].shape}")
     print(f"Using hyperparameters: {hp}")

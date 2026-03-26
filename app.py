@@ -1315,11 +1315,10 @@ with tab_train:
             if is_valid:
                 st.caption(f"Folder Active: `{os.path.basename(active_proc_dir)}` ✅")
             else:
-                st.warning(
-                    f"⚠️ Folder **`{os.path.basename(active_proc_dir)}`** belum memiliki data sekuens (`X_train.npy`). "
-                    f"Dataset ini dibuat dengan mode **Lookback Agnostic** dan tidak bisa langsung dipakai untuk training. "
-                    f"Silakan kembali ke tab **Preprocessing** dan jalankan ulang dengan mode **Fixed Sequence (Tensor .npy)** "
-                    f"menggunakan nama yang sama."
+                st.info(
+                    f"ℹ️ Folder **`{os.path.basename(active_proc_dir)}`** dibuat dengan mode **Lookback Agnostic**. "
+                    f"Sistem akan otomatis membuat sequens menggunakan **Lookback = {hp.get('lookback', 72)} jam** "
+                    f"(dari konfigurasi di bawah) saat training dimulai."
                 )
         else:
             st.warning("Processed folder not found. Run Preprocessing first.")
