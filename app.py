@@ -1278,14 +1278,26 @@ with tab_train:
     with st.expander("Select Preprocessed Data Version", expanded=not has_data):
         # Always use the root processed directory for listing
         if os.path.exists(proc_dir):
-            versions = [f for f in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, f)) and os.path.exists(os.path.join(proc_dir, f, 'X_train.npy'))]
-            versions = sorted(versions, reverse=True)
-            options = ["Latest (Default)"] + versions
+            # Show ALL folders that have at least a prep_summary.json (not just X_train.npy)
+            all_versions = [f for f in os.listdir(proc_dir) 
+                           if os.path.isdir(os.path.join(proc_dir, f)) 
+                           and os.path.exists(os.path.join(proc_dir, f, 'prep_summary.json'))]
+            all_versions = sorted(all_versions, reverse=True)
+            
+            # Annotate which ones have tensors ready (X_train.npy)
+            def _train_label(x):
+                if x == "Latest (Default)":
+                    return x
+                has_tensors = os.path.exists(os.path.join(proc_dir, x, 'X_train.npy'))
+                base = label_format_with_time(x, proc_dir)
+                return base if has_tensors else f"⚠️ {base} [Agnostic - perlu Fixed Sequence]"
+            
+            options = ["Latest (Default)"] + all_versions
             
             # Select the most recent version if it was just created
             default_idx = 0
             selected_v = st.selectbox("Data Version for Training:", options, index=default_idx, key="data_version_train",
-                                   format_func=lambda x: label_format_with_time(x, proc_dir))
+                                   format_func=_train_label)
             
             if st.button("Refresh Daftar Versi"):
                 st.rerun()
@@ -1301,12 +1313,17 @@ with tab_train:
             # Check if this version is actually valid (has npy files)
             is_valid = os.path.exists(os.path.join(active_proc_dir, 'X_train.npy'))
             if is_valid:
-                st.caption(f"Folder Active: `{os.path.basename(active_proc_dir)}` ")
+                st.caption(f"Folder Active: `{os.path.basename(active_proc_dir)}` ✅")
             else:
-                st.error(f"Folder `{os.path.basename(active_proc_dir)}` does not contain data mapping (X_train.npy not found).")
-                st.info("Select 'Latest (Default)' or re-run Preprocessing.")
+                st.warning(
+                    f"⚠️ Folder **`{os.path.basename(active_proc_dir)}`** belum memiliki data sekuens (`X_train.npy`). "
+                    f"Dataset ini dibuat dengan mode **Lookback Agnostic** dan tidak bisa langsung dipakai untuk training. "
+                    f"Silakan kembali ke tab **Preprocessing** dan jalankan ulang dengan mode **Fixed Sequence (Tensor .npy)** "
+                    f"menggunakan nama yang sama."
+                )
         else:
             st.warning("Processed folder not found. Run Preprocessing first.")
+
 
     st.markdown("Configure model architecture and run training here.")
     
