@@ -13,10 +13,58 @@ from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime
 import logging
 import joblib
+import pickle
 logger = logging.getLogger(__name__)
 # Ensure basic logging is configured if not already
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# ============================================================
+# NUMPY CROSS-VERSION COMPATIBILITY (sys.modules aliasing)
+# ============================================================
+# NumPy 2.0 renamed internal 'numpy.core' → 'numpy._core'.
+# Pickle/joblib files saved with one version fail on the other.
+# Fix: inject missing aliases into sys.modules at import time
+# so ALL deserialization (joblib, pickle, etc.) resolves correctly.
+# ============================================================
+import sys as _sys
+
+_NUMPY_MAJOR = int(np.__version__.split('.')[0])
+
+if _NUMPY_MAJOR < 2:
+    # Running NumPy 1.x — need numpy._core aliases pointing to numpy.core
+    import numpy.core as _np_core
+    _aliases = {
+        'numpy._core':              _np_core,
+        'numpy._core.multiarray':   getattr(_np_core, 'multiarray', _np_core),
+        'numpy._core.numeric':      getattr(_np_core, 'numeric', _np_core),
+        'numpy._core.umath':        getattr(_np_core, 'umath', _np_core),
+        'numpy._core._multiarray_umath': getattr(_np_core, '_multiarray_umath', getattr(_np_core, 'multiarray', _np_core)),
+    }
+    for alias, mod in _aliases.items():
+        _sys.modules.setdefault(alias, mod)
+    logger.info("NumPy 1.x detected: injected numpy._core aliases into sys.modules")
+else:
+    # Running NumPy 2.x — need numpy.core aliases pointing to numpy._core
+    import numpy._core as _np_core
+    _aliases = {
+        'numpy.core':              _np_core,
+        'numpy.core.multiarray':   getattr(_np_core, 'multiarray', _np_core),
+        'numpy.core.numeric':      getattr(_np_core, 'numeric', _np_core),
+        'numpy.core.umath':        getattr(_np_core, 'umath', _np_core),
+        'numpy.core._multiarray_umath': getattr(_np_core, '_multiarray_umath', getattr(_np_core, 'multiarray', _np_core)),
+    }
+    for alias, mod in _aliases.items():
+        _sys.modules.setdefault(alias, mod)
+    logger.info("NumPy 2.x detected: injected numpy.core aliases into sys.modules")
+
+del _aliases, _np_core
+
+
+def safe_joblib_load(path):
+    """Load a joblib/pickle file — numpy compat is handled by sys.modules aliases above."""
+    return joblib.load(path)
 
 
 def _get_callbacks(cfg: dict):
@@ -107,8 +155,8 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
             y_scaler_path = os.path.join(proc, 'y_scaler.pkl')
             
             if os.path.exists(x_scaler_path) and os.path.exists(y_scaler_path):
-                X_scaler = joblib.load(x_scaler_path)
-                y_scaler = joblib.load(y_scaler_path)
+                X_scaler = safe_joblib_load(x_scaler_path)
+                y_scaler = safe_joblib_load(y_scaler_path)
                 X_train_scaled = X_scaler.transform(df_train[selected_features])
                 y_train_scaled = y_scaler.transform(df_train[[act_target]]).flatten()
                 X_test_scaled  = X_scaler.transform(df_test[selected_features])
@@ -342,7 +390,6 @@ def train_model(cfg: dict, data: dict = None, extra_callbacks: list = None, cust
 
     meta_path = os.path.join(model_folder, "meta.json")
     with open(meta_path, 'w') as f:
-        import json
         json.dump(meta, f, indent=2)
 
     return model, history, meta

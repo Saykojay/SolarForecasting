@@ -435,6 +435,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         'metrics_train': m_train, 'metrics_test': m_test,
         'pv_train_actual': pv_tr_a, 'pv_train_pred': pv_tr_p,
         'pv_test_actual': pv_ts_a, 'pv_test_pred': pv_ts_p,
+        'ghi_test': ghi_ts,
         'df_train': df_train, 'df_test': df_test,
         'train_indices': train_indices, 'test_indices': test_indices,
         'data_path': f"{os.path.basename(data_proc_src)}{' (Synced)' if data_reconstructed else ''}",

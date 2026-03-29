@@ -1,5 +1,10 @@
 import streamlit as st
 
+# Compatibility shim: st.rerun() was added in Streamlit 1.27.
+# Older versions only have st.experimental_rerun().
+if not hasattr(st, 'rerun'):
+    st.rerun = st.experimental_rerun
+
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -2163,7 +2168,7 @@ with tab_tuning:
         except Exception:
             pass
     else:
-        st.warning(f"Dataset not ready at ({active_tune_dir}). Run preprocessing first in the Feature Lab.", icon="")
+        st.warning(f"Dataset not ready at ({active_tune_dir}). Run preprocessing first in the Feature Lab.")
 
     # --- NEW: SEARCH SPACE EDITOR & EXECUTION (Always Visible) ---
     if cfg['tuning']['enabled']:
@@ -2908,269 +2913,22 @@ with tab_eval:
         if 'pv_test_actual' in results:
             actual_flat = results['pv_test_actual'].flatten()
             pred_flat = results['pv_test_pred'].flatten()
-            ghi_flat = results['ghi_test'].flatten()
+            if 'ghi_test' in results:
+                ghi_flat = results['ghi_test'].flatten()
+            else:
+                try:
+                    df_test_r = results['df_test']
+                    test_idx = results['test_indices']
+                    horizon_r = results['pv_test_actual'].shape[1]
+                    ghi_col_fb = cfg['data'].get('ghi_col', 'ghi_wm2')
+                    ghi_arr = df_test_r[ghi_col_fb].values[test_idx[:, np.newaxis] + np.arange(horizon_r)]
+                    ghi_flat = ghi_arr.flatten()
+                except Exception:
+                    ghi_flat = np.full(len(actual_flat), 100.0)
             mask_productive = ghi_flat > 50
         else:
             st.warning("Visualization data (arrays) not loaded. Run 'Run Evaluation' again to see detailed charts.")
             st.stop()
-        
-        # ====== ROW 3: Scatter + Residual ======
-        st.markdown("#### Actual vs Predicted")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_scatter = go.Figure()
-            fig_scatter.add_trace(go.Scattergl(
-                x=actual_flat[mask_productive], y=pred_flat[mask_productive],
-                mode='markers', marker=dict(size=3, color='#818cf8', opacity=0.3),
-                name='Predictions'
-            ))
-            max_val = max(actual_flat[mask_productive].max(), pred_flat[mask_productive].max())
-            fig_scatter.add_trace(go.Scatter(
-                x=[0, max_val], y=[0, max_val],
-                mode='lines', line=dict(color='#ef4444', dash='dash', width=1.5),
-                name='Perfect Fit'
-            ))
-            fig_scatter.update_layout(
-                title="Scatter: Test Set (Productive Hours, GHI > 50)",
-                xaxis_title="Actual (kW)", yaxis_title="Predicted (kW)",
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=450,
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
-        
-        with col2:
-            residuals = actual_flat[mask_productive] - pred_flat[mask_productive]
-            fig_hist = go.Figure(go.Histogram(
-                x=residuals, nbinsx=100,
-                marker_color='#818cf8', opacity=0.7
-            ))
-            fig_hist.add_vline(x=0, line_dash="dash", line_color="#ef4444", line_width=1.5)
-            fig_hist.update_layout(
-                title=f"Residual Distribution (Mean: {residuals.mean():.3f}, Std: {residuals.std():.3f})",
-                xaxis_title="Error: Actual - Predicted (kW)", yaxis_title="Count",
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=450,
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
-        
-        # ====== ROW 4: Time Series Sample ======
-        st.markdown("#### Time Series: Actual vs Predicted (Sample)")
-        
-        # Use test data with indices
-        try:
-            df_test = results['df_test']
-            test_indices = results['test_indices']
-            horizon = results['pv_test_actual'].shape[1]
-            
-            # Show slider for selecting sample range
-            total_seqs = len(test_indices)
-            n_show = min(200, total_seqs)
-            
-            ts_start = st.slider(
-                "Select sample range (sequence index)",
-                0, max(0, total_seqs - n_show), 0,
-                key="ts_slider"
-            )
-            ts_end = min(ts_start + n_show, total_seqs)
-            
-            # Build time-series for the selected range (use 1st step predictions)
-            sample_idx = test_indices[ts_start:ts_end]
-            sample_timestamps = df_test.index[sample_idx]
-            sample_actual = results['pv_test_actual'][ts_start:ts_end, 0]
-            sample_pred = results['pv_test_pred'][ts_start:ts_end, 0]
-            
-            fig_ts = go.Figure()
-            fig_ts.add_trace(go.Scatter(
-                x=sample_timestamps, y=sample_actual,
-                mode='lines', name='Actual',
-                line=dict(color='#ffffff', width=1.5)
-            ))
-            fig_ts.add_trace(go.Scatter(
-                x=sample_timestamps, y=sample_pred,
-                mode='lines', name='Predicted',
-                line=dict(color='#818cf8', width=1.5)
-            ))
-            fig_ts.update_layout(
-                title=f"h+1 Forecast: Sequences {ts_start} - {ts_end}",
-                xaxis_title="Timestamp", yaxis_title="Power (kW)",
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=400,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
-            st.plotly_chart(fig_ts, use_container_width=True)
-        except Exception as e:
-            st.caption(f"Time series plot not available: {e}")
-        
-        # ====== ROW 5: Per-Step Forecast Diagnostics ======
-        st.markdown("#### Diagnostics: R2 per Forecast Step")
-        per_step_r2 = results.get('per_step_r2', {})
-        if per_step_r2:
-            steps_list = sorted(per_step_r2.keys())
-            r2_vals = [per_step_r2[s] for s in steps_list]
-            
-            fig_r2_step = go.Figure()
-            fig_r2_step.add_trace(go.Scatter(
-                x=steps_list, y=r2_vals,
-                mode='lines+markers',
-                line=dict(color='#818cf8', width=2.5),
-                marker=dict(size=7, color='#818cf8'),
-                name='R2 per Step',
-                hovertemplate='Step t+%{x}: R2=%{y:.4f}<extra></extra>'
-            ))
-            # Add reference lines
-            fig_r2_step.add_hline(y=0.8, line_dash='dot', line_color='#ffffff', 
-                                  annotation_text='Target R2=0.80', annotation_position='top left')
-            fig_r2_step.add_hline(y=0, line_dash='dash', line_color='#ef4444', line_width=1)
-            fig_r2_step.update_layout(
-                title="R2 Score per Forecast Step (ALL Hours)",
-                xaxis_title="Forecast Step (t+n hours)", yaxis_title="R2 Score",
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=400,
-                yaxis=dict(range=[min(min(r2_vals) - 0.05, -0.1), 1.0]),
-            )
-            st.plotly_chart(fig_r2_step, use_container_width=True)
-        else:
-            st.info("Per-step R2 diagnostics not available. Re-run evaluation.")
-        
-        # ====== ROW 6: Per-Hour-of-Day Error Analysis ======
-        st.markdown("#### Diagnostics: Error per Hour of Day")
-        hourly_metrics = results.get('hourly_metrics', {})
-        if hourly_metrics:
-            col1, col2 = st.columns(2)
-            
-            hours = list(range(24))
-            h_mae = [hourly_metrics.get(h, {}).get('mae', 0) for h in hours]
-            h_rmse = [hourly_metrics.get(h, {}).get('rmse', 0) for h in hours]
-            h_r2 = [hourly_metrics.get(h, {}).get('r2', 0) for h in hours]
-            
-            with col1:
-                fig_hourly = go.Figure()
-                fig_hourly.add_trace(go.Bar(
-                    x=hours, y=h_mae,
-                    marker_color='#818cf8', opacity=0.8,
-                    name='MAE (kW)',
-                    hovertemplate='Hour %{x}: MAE=%{y:.3f} kW<extra></extra>'
-                ))
-                fig_hourly.add_trace(go.Bar(
-                    x=hours, y=h_rmse,
-                    marker_color='#f472b6', opacity=0.6,
-                    name='RMSE (kW)',
-                    hovertemplate='Hour %{x}: RMSE=%{y:.3f} kW<extra></extra>'
-                ))
-                fig_hourly.update_layout(
-                    title="MAE & RMSE per Hour of Day (All 24h Steps)",
-                    xaxis_title="Hour of Day", yaxis_title="Error (kW)",
-                    template="plotly_dark",
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                    height=400, barmode='group',
-                    xaxis=dict(dtick=1),
-                )
-                st.plotly_chart(fig_hourly, use_container_width=True)
-            
-            with col2:
-                # Color-code R2 bars: green if good, red if bad
-                colors = ['#ffffff' if r > 0.7 else '#fbbf24' if r > 0.3 else '#ef4444' for r in h_r2]
-                fig_r2h = go.Figure()
-                fig_r2h.add_trace(go.Bar(
-                    x=hours, y=h_r2,
-                    marker_color=colors, opacity=0.85,
-                    name='R2 per Hour',
-                    hovertemplate='Hour %{x}: R2=%{y:.4f}<extra></extra>'
-                ))
-                fig_r2h.add_hline(y=0.8, line_dash='dot', line_color='#ffffff', 
-                                  annotation_text='Target', annotation_position='top left')
-                fig_r2h.update_layout(
-                    title="R2 per Hour of Day",
-                    xaxis_title="Hour of Day", yaxis_title="R2",
-                    template="plotly_dark",
-                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                    height=400,
-                    xaxis=dict(dtick=1),
-                )
-                st.plotly_chart(fig_r2h, use_container_width=True)
-            
-            # Hourly metrics table
-            with st.expander("Full Hourly Table", expanded=False):
-                tbl_data = []
-                for h in range(24):
-                    m = hourly_metrics.get(h, {})
-                    tbl_data.append({
-                        'Jam': f"{h:02d}:00",
-                        'MAE (kW)': f"{m.get('mae', 0):.4f}",
-                        'RMSE (kW)': f"{m.get('rmse', 0):.4f}",
-                        'R2': f"{m.get('r2', 0):.4f}",
-                        'N Samples': m.get('count', 0),
-                    })
-                st.dataframe(pd.DataFrame(tbl_data), use_container_width=True)
-        else:
-            # Fallback to old method
-            try:
-                df_test = results['df_test']
-                test_indices = results['test_indices']
-                abs_error_per_seq = np.abs(results['pv_test_actual'][:, 0] - results['pv_test_pred'][:, 0])
-                hours_per_seq = df_test.index[test_indices].hour
-                df_hourly = pd.DataFrame({'Hour': hours_per_seq[:len(abs_error_per_seq)], 'MAE': abs_error_per_seq[:len(hours_per_seq)]})
-                hourly_stats = df_hourly.groupby('Hour')['MAE'].agg(['mean', 'std']).reset_index()
-                fig_hour = go.Figure(go.Bar(x=hourly_stats['Hour'], y=hourly_stats['mean'], marker_color='#818cf8'))
-                fig_hour.update_layout(title="MAE by Hour (h+1)", xaxis_title="Hour", yaxis_title="MAE (kW)", template="plotly_dark", height=400)
-                st.plotly_chart(fig_hour, use_container_width=True)
-            except Exception as e:
-                st.caption(f"Hourly error chart not available: {e}")
-        
-        # ====== ROW 6: Actual vs Predicted Distribution ======
-        st.markdown("#### Power Distribution")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            fig_dist = go.Figure()
-            fig_dist.add_trace(go.Histogram(
-                x=actual_flat[mask_productive], nbinsx=80, name='Actual',
-                marker_color='#ffffff', opacity=0.6
-            ))
-            fig_dist.add_trace(go.Histogram(
-                x=pred_flat[mask_productive], nbinsx=80, name='Predicted',
-                marker_color='#818cf8', opacity=0.6
-            ))
-            fig_dist.update_layout(
-                title="Power Distribution (Productive Hours)",
-                xaxis_title="Power (kW)", yaxis_title="Count",
-                barmode='overlay',
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=400,
-            )
-            st.plotly_chart(fig_dist, use_container_width=True)
-        
-        with col2:
-            # QQ-like: sorted actual vs sorted predicted  
-            sorted_actual = np.sort(actual_flat[mask_productive])
-            sorted_pred = np.sort(pred_flat[mask_productive])
-            # Downsample for performance
-            step = max(1, len(sorted_actual) // 2000)
-            fig_qq = go.Figure()
-            fig_qq.add_trace(go.Scattergl(
-                x=sorted_actual[::step], y=sorted_pred[::step],
-                mode='markers', marker=dict(size=3, color='#818cf8', opacity=0.5),
-                name='Q-Q'
-            ))
-            fig_qq.add_trace(go.Scatter(
-                x=[0, sorted_actual.max()], y=[0, sorted_actual.max()],
-                mode='lines', line=dict(color='#ef4444', dash='dash'),
-                name='Perfect'
-            ))
-            fig_qq.update_layout(
-                title="Q-Q Plot: Actual vs Predicted Quantiles",
-                xaxis_title="Actual Quantiles (kW)", yaxis_title="Predicted Quantiles (kW)",
-                template="plotly_dark",
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                height=400,
-            )
-            st.plotly_chart(fig_qq, use_container_width=True)
         
         # ====== DOWNLOAD ======
         st.markdown("---")
@@ -3185,7 +2943,28 @@ with tab_eval:
                 mime="text/csv",
                 use_container_width=True,            )
         with col2:
+            # Try to build timestamps
+            try:
+                df_test_r = results['df_test']
+                test_idx = results['test_indices']
+                horizon_r = results['pv_test_actual'].shape[1]
+                pos_grid = test_idx[:, np.newaxis] + np.arange(horizon_r)
+                # Clip pos_grid to prevent IndexError just in case
+                pos_grid = np.clip(pos_grid, 0, len(df_test_r) - 1)
+                
+                # Fetch timestamps using 1D flattened array
+                ts_flat = df_test_r.index[pos_grid.flatten()]
+                
+                # Format to string neatly 
+                if hasattr(ts_flat, 'strftime'):
+                    ts_flat = ts_flat.strftime('%Y-%m-%d %H:%M:%S').tolist()
+            except Exception as e:
+                import traceback
+                print(f"Failed to generate timestamps: {e}")
+                ts_flat = list(range(len(actual_flat)))
+                
             df_preds = pd.DataFrame({
+                'timestamp': ts_flat,
                 'actual': actual_flat,
                 'predicted': pred_flat,
                 'ghi': ghi_flat,
@@ -4174,6 +3953,13 @@ with tab_compare:
                         
                         status_text.empty()
                         st.session_state.comparison_df = pd.DataFrame(comparison_results)
+                        
+                        # FORCE NUMERIC TYPES: to prevent Plotly from treating metrics as strings/discrete categories
+                        numeric_cols = ['R2 Test', 'R2 Train', 'MAE', 'nMAE (%)', 'RMSE', 'nRMSE (%)', 'Inference Time (ms)']
+                        for nc in numeric_cols:
+                            if nc in st.session_state.comparison_df.columns:
+                                st.session_state.comparison_df[nc] = pd.to_numeric(st.session_state.comparison_df[nc], errors='coerce').fillna(0)
+                                
                         print(f"\nCOMPARISON FINISHED: {len(comparison_results)} models analyzed.")
                         print("="*60 + "\n")
                         sys.stdout.flush()
@@ -4252,31 +4038,31 @@ with tab_compare:
                 # First Row: R2 and MAE
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_r2 = px.bar(df_comp, x='Model ID', y='R2 Test', color='R2 Test', 
+                    fig_r2 = px.bar(df_comp, x='Model ID', y='R2 Test', color='Model ID', 
                                    title="R2 Score (Higher is Better)",
-                                   color_continuous_scale='Viridis')
-                    fig_r2.update_layout(template="plotly_dark", height=400)
+                                   color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig_r2.update_layout(template="plotly_dark", height=400, showlegend=False)
                     st.plotly_chart(fig_r2, use_container_width=True)
                 with c2:
-                    fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='MAE',
+                    fig_mae = px.bar(df_comp, x='Model ID', y='MAE', color='Model ID',
                                     title="MAE Score (Lower is Better)",
-                                    color_continuous_scale='Reds_r')
-                    fig_mae.update_layout(template="plotly_dark", height=400)
+                                    color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig_mae.update_layout(template="plotly_dark", height=400, showlegend=False)
                     st.plotly_chart(fig_mae, use_container_width=True)
                 
                 # Second Row: Inference Time and Overfitting Delta
                 c3, c4 = st.columns(2)
                 with c3:
-                    fig_time = px.bar(df_comp, x='Model ID', y='Inference Time (ms)', color='Inference Time (ms)',
+                    fig_time = px.bar(df_comp, x='Model ID', y='Inference Time (ms)', color='Model ID',
                                     title="Inference Time per sample (Lower is Faster)",
-                                    color_continuous_scale='Oranges')
-                    fig_time.update_layout(template="plotly_dark", height=400)
+                                    color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig_time.update_layout(template="plotly_dark", height=400, showlegend=False)
                     st.plotly_chart(fig_time, use_container_width=True)
                 with c4:
-                    fig_rmse = px.bar(df_comp, x='Model ID', y='RMSE', color='RMSE',
+                    fig_rmse = px.bar(df_comp, x='Model ID', y='RMSE', color='Model ID',
                                     title="RMSE (Lower is Safer/Better)",
-                                    color_continuous_scale='Purples_r')
-                    fig_rmse.update_layout(template="plotly_dark", height=400)
+                                    color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig_rmse.update_layout(template="plotly_dark", height=400, showlegend=False)
                     st.plotly_chart(fig_rmse, use_container_width=True)
                 
                 

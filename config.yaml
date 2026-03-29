@@ -40,7 +40,7 @@ mlflow:
   experiment_name: PatchTST_CSI_TransferLearning
   tracking_uri: mlruns
 model:
-  architecture: rnn
+  architecture: gru
   hyperparameters:
     batch_size: 32
     d_model: 64
@@ -56,7 +56,7 @@ model:
 paths:
   logs_dir: logs
   models_dir: models
-  processed_dir: data/processed/tes
+  processed_dir: data/processed/sayaujicoba
   target_data_dir: data/target
 preprocessing:
   clip_precipitation: 100.0
