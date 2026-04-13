@@ -46,14 +46,14 @@ def preprocess_algorithm1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     # 4. Outlier Detection (Notebook Logic)
     if pcfg.get('remove_outliers', True):
-        ghi_col = cols['ghi_col']
+        ghi_col = cols.get('ghi_col')
         target_col = cols['target_col']
         temp_col = cols['temp_col']
         
         # Rule 1: Physical Parameters Extreme
         outlier_mask = pd.Series([False] * len(df), index=df.index)
         
-        if ghi_col in df.columns: outlier_mask |= (df[ghi_col] > 2000)
+        if ghi_col and ghi_col in df.columns: outlier_mask |= (df[ghi_col] > 2000)
         if temp_col in df.columns: outlier_mask |= (df[temp_col] < -30)
         if cols['rh_col'] in df.columns: 
             outlier_mask |= (df[cols['rh_col']] < 0) | (df[cols['rh_col']] > 100)
@@ -61,11 +61,11 @@ def preprocess_algorithm1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             outlier_mask |= (df[cols['wind_speed_col']] < 0)
         
         # Rule 2: PV-GHI Inconsistency (PV 0 when GHI is high)
-        if pcfg.get('ghi_high_pv_zero', True) and target_col in df.columns and ghi_col in df.columns:
+        if pcfg.get('ghi_high_pv_zero', True) and target_col in df.columns and ghi_col and ghi_col in df.columns:
             outlier_mask |= ((df[target_col] <= 0) & (df[ghi_col] > 200))
             
         # Rule 3: PV High when GHI is Dark (Sensor Error)
-        if pcfg.get('ghi_dark_pv_high', True) and target_col in df.columns and ghi_col in df.columns:
+        if pcfg.get('ghi_dark_pv_high', True) and target_col in df.columns and ghi_col and ghi_col in df.columns:
             cap = cfg['pv_system']['nameplate_capacity_kw']
             thresh = cfg['pv_system'].get('csi_ghi_threshold', 20)
             outlier_mask |= ((df[target_col] > 0.1 * cap) & (df[ghi_col] < thresh))
@@ -84,11 +84,13 @@ def preprocess_algorithm1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     # 5. Advanced Cleaning (Optional/Customizable)
     # 5a. GHI vs DHI Correction
-    if pcfg.get('fix_ghi_dhi', True) and 'ghi_wm2' in df.columns and 'dhi_wm2' in df.columns:
-        inconsistent = df['ghi_wm2'] < df['dhi_wm2']
+    dhi_col_clean = cols.get('dhi_col')
+    ghi_col_clean = cols.get('ghi_col')
+    if pcfg.get('fix_ghi_dhi', True) and ghi_col_clean and ghi_col_clean in df.columns and dhi_col_clean and dhi_col_clean in df.columns:
+        inconsistent = df[ghi_col_clean] < df[dhi_col_clean]
         if inconsistent.any():
             print(f"  [Cleaning] Fixed {inconsistent.sum()} rows where GHI < DHI.")
-            df.loc[inconsistent, 'ghi_wm2'] = df.loc[inconsistent, 'dhi_wm2']
+            df.loc[inconsistent, ghi_col_clean] = df.loc[inconsistent, dhi_col_clean]
             
     # 5b. Precipitation Clipping
     precip_limit = pcfg.get('clip_precipitation')
@@ -164,8 +166,8 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     target_cfg = cfg['target']
 
     time_col = cols['time_col']
-    ghi_col = cols['ghi_col']
-    dhi_col = cols['dhi_col']
+    ghi_col = cols.get('ghi_col')
+    dhi_col = cols.get('dhi_col')
     temp_col = cols['temp_col']
     rh_col = cols['rh_col']
     wind_col = cols['wind_speed_col']
@@ -181,20 +183,44 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     # 1. CLEAR SKY PV & CSI TARGET (only if use_csi=true or physics=true)
     fg = cfg['features']['groups']
     need_csi = target_cfg.get('use_csi', False) or fg.get('physics', False)
-    
+
+    has_ghi = ghi_col and ghi_col in df.columns
+
+    # --- Adaptive GHI proxy: synthesise GHI from DHI + DNI when column is absent ---
+    # GHI ≈ DHI + DNI is a reasonable upper-bound proxy for tropical sites.
+    # It is only used for clear-sky power & productive-hour mask; it does NOT
+    # appear in the training features, so model inputs are unaffected.
+    ghi_proxy_col = None   # name of the (possibly synthetic) column to use
+    if has_ghi:
+        ghi_proxy_col = ghi_col
+    elif need_csi:
+        _dhi_c = cols.get('dhi_col')
+        _dni_c = cols.get('dni_col')
+        if _dhi_c and _dhi_c in df.columns and _dni_c and _dni_c in df.columns:
+            df['_ghi_proxy'] = (df[_dhi_c] + df[_dni_c]).clip(lower=0)
+            ghi_proxy_col = '_ghi_proxy'
+            print(f"  [Adaptive] GHI column '{ghi_col}' not found. "
+                  f"Estimated GHI = {_dhi_c} + {_dni_c} (proxy for CS calc only).")
+        else:
+            print(f"  Warning: CSI requested but GHI column '{ghi_col}' not found "
+                  f"and DHI/DNI columns also unavailable. Skipping CSI calculation.")
+            need_csi = False
+
     if need_csi:
         print("Calculating Clear Sky PV & CSI...")
-        
-        # POA Fallback: Use GHI if POA is not present
-        actual_poa = df[poa_col].values if poa_col in df.columns else df[ghi_col].values
-        if poa_col not in df.columns:
-            print(f"  Warning: {poa_col} missing. Using {ghi_col} as proxy.")
-            
+
+        # POA Fallback hierarchy: explicit poa_col → ghi_proxy_col
+        if poa_col in df.columns:
+            actual_poa = df[poa_col].values
+        else:
+            actual_poa = df[ghi_proxy_col].values
+            print(f"  Warning: {poa_col} missing. Using {ghi_proxy_col} as POA proxy.")
+
         df['pv_clear_sky'] = calculate_clear_sky_pv(
-            ghi=df[ghi_col].values,
+            ghi=df[ghi_proxy_col].values,
             poa=actual_poa,
             temp_ambient=df[temp_col].values,
-            wind_speed=df[wind_col].values if wind_col in df.columns else None,
+            wind_speed=df[wind_col].values if wind_col and wind_col in df.columns else None,
             nameplate_capacity=pv_cfg['nameplate_capacity_kw'],
             temp_coeff=pv_cfg['temp_coeff'],
             ref_temp=pv_cfg['ref_temp'],
@@ -204,23 +230,32 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         ghi_threshold = target_cfg['csi_ghi_threshold']
         csi_max = target_cfg['csi_max']
 
-        productive_mask = df[ghi_col] > ghi_threshold
+        productive_mask = df[ghi_proxy_col] > ghi_threshold
         df['csi_target'] = 0.0
-        safe_cs = df.loc[productive_mask, 'pv_clear_sky'].replace(0, np.nan)
-        df.loc[productive_mask, 'csi_target'] = (
-            df.loc[productive_mask, target_col] / safe_cs
-        ).clip(0, csi_max)
-        df['csi_target'] = df['csi_target'].fillna(0)
 
-        productive_csi = df.loc[productive_mask, 'csi_target']
-        print(f"  CSI stats (productive hours):")
-        print(f"    Mean: {productive_csi.mean():.4f}")
-        print(f"    Std:  {productive_csi.std():.4f}")
+        # Only calculate actual CSI if we have ground-truth PV output
+        if target_col in df.columns:
+            safe_cs = df.loc[productive_mask, 'pv_clear_sky'].replace(0, np.nan)
+            df.loc[productive_mask, 'csi_target'] = (
+                df.loc[productive_mask, target_col] / safe_cs
+            ).clip(0, csi_max)
+            df['csi_target'] = df['csi_target'].fillna(0)
+
+            productive_csi = df.loc[productive_mask, 'csi_target']
+            print(f"  CSI stats (productive hours):")
+            print(f"    Mean: {productive_csi.mean():.4f}")
+            print(f"    Std:  {productive_csi.std():.4f}")
+        else:
+            print(f"  Note: target column '{target_col}' not found — CSI target left as 0 (inference mode).")
 
         # Normalized PV clear sky
         df['pv_cs_normalized'] = df['pv_clear_sky'] / pv_cfg['nameplate_capacity_kw']
+
+        # Drop temporary proxy column if created
+        if ghi_proxy_col == '_ghi_proxy':
+            df.drop(columns=['_ghi_proxy'], inplace=True)
     else:
-        print("Skipping CSI/Clear-Sky (use_csi=false, physics=false)")
+        print("Skipping CSI/Clear-Sky (use_csi=false, physics=false, or missing radiation columns)")
         df['pv_clear_sky'] = 0.0
         df['csi_target'] = 0.0
         df['pv_cs_normalized'] = 0.0
@@ -253,7 +288,7 @@ def create_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     # 3. LAG & ROLLING FEATURES (Adaptive to all available weather/system columns)
     # CRITICAL: Always include the target series itself as a feature for history!
     act_target = 'csi_target' if target_cfg['use_csi'] else target_col
-    weather_cols = [ghi_col, dhi_col, temp_col, rh_col, wind_col, act_target]
+    weather_cols = [c for c in [ghi_col, dhi_col, temp_col, rh_col, wind_col, act_target] if c]
     # Add any other numeric columns from data config that might exist
     if 'wind_dir_col' in cols and cols['wind_dir_col'] in df.columns: weather_cols.append(cols['wind_dir_col'])
     # Detect precipitation, cloud, or Open-Meteo supplementary columns

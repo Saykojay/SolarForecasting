@@ -10,7 +10,6 @@ import pandas as pd
 import tensorflow as tf
 import joblib
 import logging
-import sys
 import copy
 
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -216,8 +215,7 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
     # If scaler_dir is provided, it means we are using a bundled model
     proc = scaler_dir if scaler_dir else root_proc
     pv_cfg = copy.deepcopy(cfg['pv_system'])
-    found_orig_pv = False
-    
+
     # Detect horizon from model instead of relying solely on config
     horizon = model.output_shape[1]
     lookback = model.input_shape[1]
@@ -391,26 +389,54 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
 
     if use_csi:
         from src.data_prep import calculate_clear_sky_pv
+
+        def _get_irradiance_proxy(df, primary_col, cfg_data):
+            """Return irradiance array: prefer primary_col, fallback to DHI+DNI proxy."""
+            if primary_col and primary_col in df.columns:
+                return df[primary_col].values
+            dhi_c = cfg_data.get('dhi_col')
+            dni_c = cfg_data.get('dni_col')
+            if dhi_c and dhi_c in df.columns and dni_c and dni_c in df.columns:
+                return (df[dhi_c] + df[dni_c]).clip(lower=0).values
+            # Last resort: constant representing full irradiance (neutral for clear-sky calc)
+            logger.warning("GHI and DHI/DNI columns missing — using constant 500 W/m² proxy for CS calculation.")
+            return np.full(len(df), 500.0)
+
         def get_cs(df):
-            if 'pv_clear_sky' in df.columns:
+            # Prefer pre-computed pv_clear_sky (non-zero)
+            if 'pv_clear_sky' in df.columns and df['pv_clear_sky'].max() > 0:
                 return df['pv_clear_sky'].values
-                
-            poa_c = cfg['data'].get('poa_col', cfg['data']['ghi_col'])
-            if poa_c not in df.columns: poa_c = cfg['data']['ghi_col']
-            wind_c = cfg['data'].get('wind_speed_col')
+
+            ghi_col_c = cfg['data'].get('ghi_col', '')
+            poa_col_c = cfg['data'].get('poa_col', '')
+            wind_c    = cfg['data'].get('wind_speed_col')
             if wind_c not in df.columns: wind_c = None
-            
-            return calculate_clear_sky_pv(df[cfg['data']['ghi_col']].values, df[poa_c].values,
-                                          df[cfg['data']['temp_col']].values, df[wind_c].values if wind_c else None,
-                                          pv_cfg['nameplate_capacity_kw'], pv_cfg.get('temp_coeff', -0.004), pv_cfg.get('ref_temp', 25.0), pv_cfg.get('system_efficiency', 0.85))
-        
+
+            # POA: poa_col → ghi_col → DHI+DNI proxy
+            poa_arr = _get_irradiance_proxy(df,
+                          poa_col_c if poa_col_c in df.columns else ghi_col_c,
+                          cfg['data'])
+            ghi_arr = _get_irradiance_proxy(df, ghi_col_c, cfg['data'])
+
+            return calculate_clear_sky_pv(ghi_arr, poa_arr,
+                                          df[cfg['data']['temp_col']].values,
+                                          df[wind_c].values if wind_c else None,
+                                          pv_cfg['nameplate_capacity_kw'],
+                                          pv_cfg.get('temp_coeff', -0.004),
+                                          pv_cfg.get('ref_temp', 25.0),
+                                          pv_cfg.get('system_efficiency', 0.85))
+
         cs_arr_tr = get_cs(df_train)
         cs_arr_ts = get_cs(df_test)
         cs_tr = cs_arr_tr[train_indices[:, np.newaxis] + steps]
         cs_ts = cs_arr_ts[test_indices[:, np.newaxis] + steps]
+
+        # CSI predictions (normalized 0-1): model raw output clipped
+        csi_ts_p = np.clip(y_ts_r[:, :, 0] if len(y_ts_r.shape) == 3 else y_ts_r, 0.0, 1.0)
+
         pv_tr_p = np.clip(y_tr_r[:,:,0] if len(y_tr_r.shape)==3 else y_tr_r, 0, 1.2) * cs_tr
         pv_ts_p = np.clip(y_ts_r[:,:,0] if len(y_ts_r.shape)==3 else y_ts_r, 0, 1.2) * cs_ts
-        
+
         # Robustly guess original capacity to avoid nMAE / nRMSE exploding
         # Clear Sky maximum is practically identical to effective Nameplate Capacity
         eval_capacity_kw = max(np.max(cs_arr_tr), np.max(cs_arr_ts))
@@ -418,15 +444,45 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         eval_capacity_kw = pv_cfg['nameplate_capacity_kw']
         pv_tr_p = np.clip(y_tr_r, 0, eval_capacity_kw * 1.2)
         pv_ts_p = np.clip(y_ts_r, 0, eval_capacity_kw * 1.2)
+        # Normalize to 0-1 capacity factor
+        csi_ts_p = np.clip(pv_ts_p / max(eval_capacity_kw, 1e-6), 0.0, 1.0)
 
     t_col = cfg['data']['target_col']
     # Fallback to whatever is available in the dataframe if the config one doesn't exist but the other does
     if t_col not in df_train.columns and 'pv_output_kw' in df_train.columns: t_col = 'pv_output_kw'
-    
+
     pv_tr_a = df_train[t_col].values[train_indices[:, np.newaxis] + steps]
     pv_ts_a = df_test[t_col].values[test_indices[:, np.newaxis] + steps]
-    ghi_ts = df_test[cfg['data']['ghi_col']].values[test_indices[:, np.newaxis] + steps]
-    pv_ts_p[ghi_ts < cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)] = 0
+
+    # Productive-hours mask: use GHI if available, else DHI+DNI proxy, else skip masking
+    _ghi_col = cfg['data'].get('ghi_col', '')
+    _dhi_col = cfg['data'].get('dhi_col', '')
+    _dni_col = cfg['data'].get('dni_col', '')
+    if _ghi_col and _ghi_col in df_test.columns:
+        _irr_series = df_test[_ghi_col].values
+    elif _dhi_col and _dhi_col in df_test.columns and _dni_col and _dni_col in df_test.columns:
+        _irr_series = (df_test[_dhi_col] + df_test[_dni_col]).clip(lower=0).values
+    else:
+        _irr_series = None
+
+    _prod_thresh = cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)
+    if _irr_series is not None:
+        ghi_ts = _irr_series[test_indices[:, np.newaxis] + steps]
+        pv_ts_p[ghi_ts < _prod_thresh] = 0
+    else:
+        ghi_ts = np.full_like(pv_ts_a, fill_value=500.0)  # neutral: all hours treated as productive
+
+    # Actual CSI (normalized 0-1): pv_actual / clear_sky, or pv_actual / capacity for non-CSI
+    if use_csi:
+        csi_ts_a = np.clip(
+            pv_ts_a / np.maximum(cs_ts, 1e-6),
+            0.0, 1.0
+        )
+        # Zero out nighttime (consistent with prediction zeroing)
+        csi_ts_a[ghi_ts < cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)] = 0.0
+        csi_ts_p[ghi_ts < cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)] = 0.0
+    else:
+        csi_ts_a = np.clip(pv_ts_a / max(eval_capacity_kw, 1e-6), 0.0, 1.0)
 
     m_train = calculate_full_metrics(pv_tr_a, pv_tr_p, None, "TRAIN", eval_capacity_kw)
     m_test = calculate_full_metrics(pv_ts_a, pv_ts_p, None, "TEST", eval_capacity_kw)
@@ -435,6 +491,9 @@ def evaluate_model(model: tf.keras.Model, cfg: dict, data: dict = None, scaler_d
         'metrics_train': m_train, 'metrics_test': m_test,
         'pv_train_actual': pv_tr_a, 'pv_train_pred': pv_tr_p,
         'pv_test_actual': pv_ts_a, 'pv_test_pred': pv_ts_p,
+        'csi_test_pred': csi_ts_p,    # normalized prediction 0-1
+        'csi_test_actual': csi_ts_a,  # normalized actual 0-1
+        'eval_capacity_kw': float(eval_capacity_kw),
         'ghi_test': ghi_ts,
         'df_train': df_train, 'df_test': df_test,
         'train_indices': train_indices, 'test_indices': test_indices,
@@ -648,6 +707,38 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     import joblib
     try:
         df_test = safe_read_pickle(os.path.join(target_dir, 'df_test_feats.pkl'))
+        
+        # INFERENCE MODE: Combine train and test splits to get the full 8760 target dataset
+        train_feats_path = os.path.join(target_dir, 'df_train_feats.pkl')
+        if os.path.exists(train_feats_path):
+            import pandas as pd
+            df_train_part = safe_read_pickle(train_feats_path)
+            # Combine them and sort by index (timestamp)
+            df_full = pd.concat([df_train_part, df_test]).sort_index()
+            # Remove any duplicates just in case
+            df_full = df_full[~df_full.index.duplicated(keep='first')]
+            df_test = df_full
+            print(f"[INFO] Merged train & test splits for full continuous inference. Total rows: {len(df_test)}")
+            
+            # --- CIRCULAR PADDING FOR FULL-YEAR INFERENCE ---
+            if len(df_test) >= 8760:
+                print(f"[INFO] Applying Circular Padding to achieve full 8760 predictions (Lookback={lookback}, Horizon={horizon})...")
+                # 1. Pad start with tail data
+                pad_start = df_test.tail(lookback).copy()
+                # Adjust index: back from the first original timestamp
+                first_ts = df_test.index[0]
+                freq = df_test.index.inferred_freq or 'H'
+                pad_start.index = pd.date_range(end=first_ts, periods=lookback + 1, freq=freq)[:-1]
+                
+                # 2. Pad end with head data (to cover the last horizon steps)
+                pad_end = df_test.head(horizon - 1).copy()
+                last_ts = df_test.index[-1]
+                pad_end.index = pd.date_range(start=last_ts, periods=horizon, freq=freq)[1:]
+                
+                # 3. Concatenate all
+                df_test = pd.concat([pad_start, df_test, pad_end])
+                print(f"       New total rows with circular padding: {len(df_test)}")
+            
     except Exception as e:
         raise ValueError(f"Gagal memuat df_test_feats.pkl dari {target_dir}. Detail: {e}")
 
@@ -728,29 +819,35 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
         if missing:
             raise ValueError(f"Target data missing features required by model: {missing}")
         
-        # Extract features in SOURCE order
-        X_raw = df_test[source_features].values
+        # Extract features in SOURCE order — keep as DataFrame to avoid sklearn feature-name warning
+        X_raw_df = df_test[source_features]
         print(f"  Re-ordering target features to match source: {source_features}")
     else:
         # Fallback: use whatever features are available
         if target_features:
-            X_raw = df_test[target_features].values
+            X_raw_df = df_test[target_features]
         else:
             # Last resort: load pre-scaled X_test
             X_test = np.load(os.path.join(target_dir, 'X_test.npy'))
             print("[WARN] Could not determine feature order. Using pre-scaled X_test directly.")
-            # In this fallback, we still need y data
             y_test = np.load(os.path.join(target_dir, 'y_test.npy'))
             source_features = target_features
-            # Skip re-scaling, go directly to prediction
-            X_raw = None
-    
+            X_raw_df = None
+
+    # Convenience alias used below
+    X_raw = X_raw_df.values if X_raw_df is not None else None
+
     if X_raw is not None:
-        # Scale with SOURCE X_scaler
-        X_scaled = source_x_scaler.transform(X_raw)
-        
-        # Get target values
-        y_raw = df_test[act_target].values
+        # Scale with SOURCE X_scaler; pass DataFrame to preserve feature names and suppress warnings
+        X_scaled = source_x_scaler.transform(X_raw_df)
+
+        # Get target values (may be absent for pure-inference datasets like TMY)
+        if act_target in df_test.columns:
+            y_raw = df_test[act_target].values
+        else:
+            # Inference-only mode: no ground truth → use zeros as placeholder
+            print(f"  [Inference mode] Target column '{act_target}' not found. Using placeholder zeros.")
+            y_raw = np.zeros(len(df_test))
         y_scaled = source_y_scaler.transform(y_raw.reshape(-1, 1)).flatten()
         
         # Create sequences
@@ -797,57 +894,105 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
                 target_col = alt
                 break
 
+    # Helper: resolve irradiance array with DHI+DNI fallback
+    def _irr_proxy(col_name, df):
+        if col_name and col_name in df.columns:
+            return df[col_name].values
+        _dhi = cfg['data'].get('dhi_col', '')
+        _dni = cfg['data'].get('dni_col', '')
+        if _dhi and _dhi in df.columns and _dni and _dni in df.columns:
+            return (df[_dhi] + df[_dni]).clip(lower=0).values
+        return np.full(len(df), 500.0)  # neutral fallback
+
     if use_csi:
         # CSI mode: CSI * clear_sky_target → power in target capacity
-        # DYNAMIC RECALCUALTION: Re-calculate Clear Sky using CURRENT capacity 
-        # to ensure scaling is correct even if preprocessed with wrong capacity.
         from src.data_prep import calculate_clear_sky_pv
-        
-        # Get weather columns needed for CS
-        ghi_col = cfg['data']['ghi_col']
-        poa_col = cfg['data'].get('poa_col', ghi_col)
+
+        ghi_col  = cfg['data'].get('ghi_col', '')
+        poa_col  = cfg['data'].get('poa_col', '')
         temp_col = cfg['data']['temp_col']
-        wind_col = cfg['data'].get('wind_speed_col')
-        
-        # Recalculate full CS array for df_test
-        current_pv_cs = calculate_clear_sky_pv(
-            ghi=df_test[ghi_col].values,
-            poa=df_test[poa_col].values if poa_col in df_test.columns else df_test[ghi_col].values,
-            temp_ambient=df_test[temp_col].values,
-            wind_speed=df_test[wind_col].values if wind_col and wind_col in df_test.columns else None,
-            nameplate_capacity=capacity_kw,
-            temp_coeff=pv_cfg['temp_coeff'],
-            ref_temp=pv_cfg['ref_temp'],
-            system_efficiency=pv_cfg['system_efficiency']
-        )
-        
+        wind_col = cfg['data'].get('wind_speed_col', '')
+
+        ghi_arr = _irr_proxy(ghi_col, df_test)
+        poa_arr = _irr_proxy(poa_col if poa_col in df_test.columns else ghi_col, df_test)
+
+        # Prefer pre-computed pv_clear_sky when it is meaningful (max > 0)
+        if 'pv_clear_sky' in df_test.columns and df_test['pv_clear_sky'].max() > 0:
+            current_pv_cs = df_test['pv_clear_sky'].values
+            print(f"[DEBUG] Using pre-computed pv_clear_sky. Max={current_pv_cs.max():.2f} kW")
+        else:
+            current_pv_cs = calculate_clear_sky_pv(
+                ghi=ghi_arr,
+                poa=poa_arr,
+                temp_ambient=df_test[temp_col].values,
+                wind_speed=df_test[wind_col].values if wind_col and wind_col in df_test.columns else None,
+                nameplate_capacity=capacity_kw,
+                temp_coeff=pv_cfg['temp_coeff'],
+                ref_temp=pv_cfg['ref_temp'],
+                system_efficiency=pv_cfg['system_efficiency']
+            )
+            print(f"[DEBUG] Dynamic CS computed. Max={current_pv_cs.max():.2f} kW")
+
         pv_cs_test = current_pv_cs[test_indices[:, np.newaxis] + steps]
-        
+
         if len(y_pred_raw.shape) == 3 and y_pred_raw.shape[2] == 1:
             pv_test_pred = np.clip(y_pred_raw[:, :, 0] * pv_cs_test, 0, capacity_kw)
         else:
             pv_test_pred = np.clip(y_pred_raw * pv_cs_test, 0, capacity_kw)
-        
-        # Log difference to debug
-        original_cs_max = df_test['pv_clear_sky'].max()
-        print(f"[DEBUG] Recap CS: Original Max={original_cs_max:.2f}kW, Dynamic Max={current_pv_cs.max():.2f}kW")
     else:
         if len(y_pred_raw.shape) == 3 and y_pred_raw.shape[2] == 1:
             pv_test_pred = np.clip(y_pred_raw[:, :, 0], 0, capacity_kw * 1.2)
         else:
             pv_test_pred = np.clip(y_pred_raw, 0, capacity_kw * 1.2)
 
-    pv_test_actual = df_test[target_col].values[test_indices[:, np.newaxis] + steps]
-    
-    # Apply productive hours mask
-    ghi_col = cfg['data']['ghi_col']
-    if ghi_col in df_test.columns:
-        ghi_test = df_test[ghi_col].values[test_indices[:, np.newaxis] + steps]
+    # Ground truth (may be zeros for inference-only / future datasets)
+    timestamps_test = df_test.index[test_indices]
+    if target_col in df_test.columns:
+        pv_test_actual = df_test[target_col].values[test_indices[:, np.newaxis] + steps]
     else:
-        ghi_test = np.ones_like(pv_test_actual) * 1000
+        pv_test_actual = np.zeros_like(pv_test_pred)
 
+    # Productive-hours mask: GHI → DHI+DNI proxy → skip
+    _ghi_col_m = cfg['data'].get('ghi_col', '')
+    _dhi_col_m = cfg['data'].get('dhi_col', '')
+    _dni_col_m = cfg['data'].get('dni_col', '')
+    if _ghi_col_m and _ghi_col_m in df_test.columns:
+        _irr_m = df_test[_ghi_col_m].values
+    elif _dhi_col_m and _dhi_col_m in df_test.columns and _dni_col_m and _dni_col_m in df_test.columns:
+        _irr_m = (df_test[_dhi_col_m] + df_test[_dni_col_m]).clip(lower=0).values
+    else:
+        _irr_m = None
+
+    # Productive-hours mask & Absolute Night Zeroing
     wrapper_thresh = cfg.get('preprocessing', {}).get('productive_hours_threshold', 50)
-    pv_test_pred[ghi_test < wrapper_thresh] = 0.0
+    
+    # Hour-based mask (Night filter for physical consistency)
+    import pandas as pd
+    t_anchor = pd.to_datetime(timestamps_test)
+    for h_idx in range(horizon):
+        # Calculate literal target hour: anchor + (h_idx + 1)
+        # Because prediction steps are T+1, T+2, etc. relative to the anchor.
+        h_val = (t_anchor + pd.Timedelta(hours=h_idx + 1)).hour
+        is_night = (h_val < 6) | (h_val >= 19) # Night is before 6 AM or after 7 PM
+        
+        # Zero out both power and capacity factor
+        pv_test_pred[is_night, h_idx] = 0.0
+        if len(y_pred_raw.shape) == 3:
+            y_pred_raw[is_night, h_idx, 0] = 0.0
+        else:
+            y_pred_raw[is_night, h_idx] = 0.0
+
+    # Irradiance-based mask (Fine-grained filter based on GHI/DHI/DNI)
+    if _irr_m is not None:
+        ghi_test = _irr_m[test_indices[:, np.newaxis] + steps]
+        is_dark = ghi_test < wrapper_thresh
+        pv_test_pred[is_dark] = 0.0
+        if len(y_pred_raw.shape) == 3:
+            y_pred_raw[is_dark, :, 0] = 0.0 # broadcast mask
+        else:
+            y_pred_raw[is_dark] = 0.0
+    else:
+        ghi_test = np.ones_like(pv_test_actual) * 1000  # all productive
 
     # 9. Calculate metrics
     print("Menghitung metrik akhir...")
@@ -864,14 +1009,21 @@ def test_on_preprocessed_target(model_path: str, target_dir: str, cfg: dict):
     m_test = calculate_full_metrics(pv_test_actual, pv_test_pred, None, f"TARGET ({os.path.basename(target_dir)})", capacity_kw)
     
     # NEW: Prepare data for export and multi-step visualization
-    timestamps_test = df_test.index[test_indices]
+    # (timestamps_test already defined above)
     
     print(f"\n[OK] Target domain testing selesai!")
+    
+    # Device detection (using global tf)
+    gpus = tf.config.list_physical_devices('GPU')
+    device_name = f"GPU ({len(gpus)})" if gpus else "CPU"
+    
     return {
         'metrics': m_test,
         'inference_time': inference_time,
+        'device': device_name,
         'timestamps': timestamps_test,
         'actual_full': pv_test_actual,
         'pred_full': pv_test_pred,
+        'pred_cf': y_pred_raw,
         'horizon': horizon
     }

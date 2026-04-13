@@ -355,10 +355,16 @@ def save_eval_results_to_disk(results):
         json.dump(serializable, f, indent=2)
     
     # 2. Save large arrays as .npy (to survive refresh)
-    array_keys = ['pv_train_actual', 'pv_train_pred', 'pv_test_actual', 'pv_test_pred', 'ghi_train', 'ghi_test', 'train_indices', 'test_indices']
+    array_keys = ['pv_train_actual', 'pv_train_pred', 'pv_test_actual', 'pv_test_pred',
+                  'ghi_train', 'ghi_test', 'train_indices', 'test_indices',
+                  'csi_test_pred', 'csi_test_actual']
     for k in array_keys:
         if k in results:
             np.save(_persist_path(f'eval_{k}.npy'), results[k])
+    # Save scalar capacity for reference
+    if 'eval_capacity_kw' in results:
+        with open(_persist_path('eval_capacity_kw.txt'), 'w') as _f:
+            _f.write(str(results['eval_capacity_kw']))
 
 def load_eval_results_from_disk():
     """Load evaluation metrics and arrays from disk."""
@@ -371,12 +377,22 @@ def load_eval_results_from_disk():
             results = json.load(f)
         
         # Load arrays if they exist
-        array_keys = ['pv_train_actual', 'pv_train_pred', 'pv_test_actual', 'pv_test_pred', 'ghi_train', 'ghi_test', 'train_indices', 'test_indices']
+        array_keys = ['pv_train_actual', 'pv_train_pred', 'pv_test_actual', 'pv_test_pred',
+                      'ghi_train', 'ghi_test', 'train_indices', 'test_indices',
+                      'csi_test_pred', 'csi_test_actual']
         for k in array_keys:
             npy_path = _persist_path(f'eval_{k}.npy')
             if os.path.exists(npy_path):
                 results[k] = np.load(npy_path)
-        
+        # Load scalar capacity
+        cap_path = _persist_path('eval_capacity_kw.txt')
+        if os.path.exists(cap_path):
+            try:
+                with open(cap_path, 'r') as _f:
+                    results['eval_capacity_kw'] = float(_f.read().strip())
+            except Exception:
+                pass
+
         return results
     except Exception:
         return None
@@ -1128,150 +1144,7 @@ with tab_data:
                                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_flow, use_container_width=True)
 
-        st.markdown("---")
-        
-        # --- PHASE 2: FEATURE ENGINEERING & SELECTION ---
-        st.markdown("#### Phase 2: Feature Engineering & Selection")
-        
-        col_f1, col_f2 = st.columns([1, 1.5])
-        with col_f1:
-            raw_f = [f for f in all_f if not any(x in f for x in ['_lag_', '_ma_', '_std_', '_sin', '_cos'])]
-            eng_f = [f for f in all_f if f not in raw_f]
-            
-            st.markdown(f"**Total Features Explored:** `{len(all_f)}`")
-            
-            # Pie Chart of Feature Types
-            feat_types = pd.DataFrame({
-                'Type': ['Raw Input', 'Engineered (Lag/Roll/Cyc)'],
-                'Count': [len(raw_f), len(eng_f)]
-            })
-            fig_types = px.pie(feat_types, values='Count', names='Type', 
-                               color_discrete_sequence=['#818cf8', '#f472b6'],
-                               hole=0.4)
-            fig_types.update_layout(template="plotly_dark", height=250, showlegend=False,
-                                    margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig_types, use_container_width=True)
-            
-            st.markdown(f"**Features Selected by Algorithm:** `{len(sel_f)}`")
-            with st.expander("View Final Feature List"):
-                for i, f in enumerate(sel_f):
-                    st.markdown(f"{i+1}. `{f}`")
-        
-        with col_f2:
-            st.markdown("**Pearson Correlation Heatmap (Features ↔ Target)**")
-            # Try to load the feature table from disk
-            _feats_pkl = os.path.join(cfg['paths']['processed_dir'], 'df_train_feats.pkl')
-            _corr_loaded = False
-            if os.path.exists(_feats_pkl):
-                try:
-                    _df_corr = safe_read_pickle(_feats_pkl)
-                    # Only keep selected features + target columns that exist in df
-                    _target_col = None
-                    for _tc in ['csi_target', 'pv_output_kw', 'pv_output_dc_kw']:
-                        if _tc in _df_corr.columns:
-                            _target_col = _tc
-                            break
-                    _keep_cols = [f for f in sel_f if f in _df_corr.columns]
-                    if _target_col and _target_col not in _keep_cols:
-                        _keep_cols = [_target_col] + _keep_cols
-                    elif not _target_col and _keep_cols:
-                        _target_col = _keep_cols[0]
-                    
-                    if len(_keep_cols) >= 2:
-                        _df_sub = _df_corr[_keep_cols].dropna()
-                        _corr_matrix = _df_sub.corr(method='pearson')
-                        
-                        # Sort rows/cols by correlation to target (descending absolute value)
-                        if _target_col in _corr_matrix.columns:
-                            _sort_order = _corr_matrix[_target_col].abs().sort_values(ascending=True).index.tolist()
-                            _corr_sorted = _corr_matrix.loc[_sort_order, _sort_order]
-                        else:
-                            _corr_sorted = _corr_matrix
-                        
-                        # Build custom hover text: "x: ...\ny: ...\nr: ..."
-                        _z = _corr_sorted.values
-                        _labels_x = _corr_sorted.columns.tolist()
-                        _labels_y = _corr_sorted.index.tolist()
-                        _hover = [[
-                            f"x: {_labels_x[j]}<br>y: {_labels_y[i]}<br>r: {_z[i][j]:.4f}"
-                            for j in range(len(_labels_x))]
-                            for i in range(len(_labels_y))]
-                        
-                        import plotly.graph_objects as go
-                        _fig_corr = go.Figure(data=go.Heatmap(
-                            z=_z,
-                            x=_labels_x,
-                            y=_labels_y,
-                            text=_hover,
-                            hovertemplate="%{text}<extra></extra>",
-                            colorscale=[
-                                [0.0,  "#d73027"],
-                                [0.25, "#f46d43"],
-                                [0.45, "#fdae61"],
-                                [0.5,  "#f7f7f7"],
-                                [0.55, "#abd9e9"],
-                                [0.75, "#4575b4"],
-                                [1.0,  "#053061"],
-                            ],
-                            zmid=0,
-                            zmin=-1,
-                            zmax=1,
-                            colorbar=dict(
-                                thickness=12,
-                                len=0.9,
-                                tickfont=dict(color="#94a3b8", size=10),
-                                title=dict(text="r", font=dict(color="#94a3b8"))
-                            ),
-                        ))
-                        _n = len(_labels_x)
-                        _cell_size = max(16, min(32, 600 // _n))
-                        _fig_corr.update_layout(
-                            template="plotly_dark",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            height=max(350, _n * _cell_size + 80),
-                            margin=dict(t=10, b=80, l=120, r=20),
-                            xaxis=dict(
-                                tickfont=dict(size=9, color="#94a3b8"),
-                                tickangle=-45,
-                                side="bottom",
-                            ),
-                            yaxis=dict(
-                                tickfont=dict(size=9, color="#94a3b8"),
-                                autorange="reversed",
-                            ),
-                        )
-                        st.plotly_chart(_fig_corr, use_container_width=True)
-                        st.caption(
-                            f"Pearson r antara {len(_keep_cols)} fitur yang dipilih. "
-                            f"Hover sel untuk melihat nilai r persis. "
-                            f"Merah = korelasi negatif kuat, Biru = positif kuat."
-                        )
-                        _corr_loaded = True
-                    else:
-                        st.warning("Tidak cukup kolom untuk membuat heatmap korelasi.")
-                except Exception as _e:
-                    st.error(f"Gagal membuat heatmap korelasi: {_e}")
-            
-            if not _corr_loaded and not os.path.exists(_feats_pkl):
-                st.info("Jalankan Preprocessing terlebih dahulu untuk melihat heatmap korelasi Pearson.")
 
-        st.markdown("---")
-        
-        # --- PHASE 3: DATA SPLITTING & SEQUENCING ---
-        st.markdown("#### Phase 3: Dataset Splitting & Scaling")
-        
-        # Display the distribution chart
-        split_data = pd.DataFrame({
-            'Set': ['Training', 'Validation'],
-            'Sequences': [stats['train_final'], stats['test_final']]
-        })
-        fig_split = px.bar(split_data, x='Set', y='Sequences', color='Set',
-                            color_discrete_map={'Training': '#818cf8', 'Validation': '#555555'})
-        fig_split.update_layout(template="plotly_dark", height=350, showlegend=False,
-                                title="Train/Val Distribution")
-        st.plotly_chart(fig_split, use_container_width=True)
-        st.caption("Distribusi data training dan validasi (sequences/baris) berdasarkan splitting method yang dipilih.")
     else:
         st.info("No preprocessing data. Run 'Step 1: Preprocessing' in the Runner tab.")
 
@@ -2027,25 +1900,74 @@ with tab_baseline:
     with c_b2:
         st.markdown("**Pemilihan Data**")
         proc_dir = cfg['paths'].get('processed_dir', 'data/processed')
+        # Resolve to the real 'processed' root (same logic as global proc_dir)
+        _resolved = os.path.abspath(proc_dir)
+        while True:
+            if os.path.basename(_resolved).lower() == 'processed':
+                break
+            _parent = os.path.dirname(_resolved)
+            if not _parent or _parent == _resolved:
+                break
+            _resolved = _parent
+        proc_dir = _resolved
+
         versions = []
         if os.path.exists(proc_dir):
-            versions = [d for d in os.listdir(proc_dir) if os.path.isdir(os.path.join(proc_dir, d)) and os.path.exists(os.path.join(proc_dir, d, 'X_train.npy'))]
+            # Include ALL versioned folders: those with X_train.npy (full ML) OR df_train_feats.pkl (Physics/pkl-only)
+            for d in os.listdir(proc_dir):
+                d_path = os.path.join(proc_dir, d)
+                if not os.path.isdir(d_path):
+                    continue
+                has_npy = os.path.exists(os.path.join(d_path, 'X_train.npy'))
+                has_pkl = os.path.exists(os.path.join(d_path, 'df_train_feats.pkl'))
+                if has_npy or has_pkl:
+                    versions.append(d)
             versions.sort(key=lambda x: os.path.getmtime(os.path.join(proc_dir, x)), reverse=True)
-            
+
+        def _b_version_label(name):
+            if name == "Latest (Default)":
+                return name
+            d_path = os.path.join(proc_dir, name)
+            has_npy = os.path.exists(os.path.join(d_path, 'X_train.npy'))
+            has_pkl = os.path.exists(os.path.join(d_path, 'df_train_feats.pkl'))
+            tag = "[ML+Physics]" if has_npy else "[Physics Only]"
+            try:
+                mtime = os.path.getmtime(d_path)
+                dt = datetime.fromtimestamp(mtime).strftime('%d/%m %H:%M')
+                return f"{name} {tag} ({dt})"
+            except Exception:
+                return f"{name} {tag}"
+
         b_data_opts = ["Latest (Default)"] + versions
-        b_data_sel = st.selectbox("Test Data Version:", b_data_opts, format_func=lambda x: label_format_with_time(x, proc_dir) if x != "Latest (Default)" else x)
-        
+        b_data_sel = st.selectbox("Test Data Version:", b_data_opts, format_func=_b_version_label, key="b_data_sel_ver")
+
         active_b_dir = proc_dir if b_data_sel == "Latest (Default)" else os.path.join(proc_dir, b_data_sel)
-        
+
+        # Show capability info for selected version
+        if b_data_sel != "Latest (Default)":
+            _has_npy = os.path.exists(os.path.join(active_b_dir, 'X_train.npy'))
+            _has_pkl = os.path.exists(os.path.join(active_b_dir, 'df_train_feats.pkl'))
+            if _has_npy and _has_pkl:
+                st.caption("✅ Siap untuk Classical ML & Physics Models")
+            elif _has_pkl:
+                st.caption("⚠️ Hanya siap untuk Physics Models. Classical ML memerlukan X_train.npy (jalankan ulang preprocessing).")
+            elif _has_npy:
+                st.caption("✅ Siap untuk Classical ML")
+
         if baseline_group == "Physics Models (PVLib)":
-            b_capacity = st.number_input("PV Capacity (kWDC)", value=1000, step=100, min_value=10)
-    
+            b_capacity = st.number_input("PV Capacity (kWDC)", value=1000.0, step=1.0, min_value=0.01)
+
     st.markdown("---")
     if st.button(f"Run Evaluation {b_model}", type="primary", use_container_width=True):
-        if not os.path.exists(os.path.join(active_b_dir, 'X_train.npy')) and baseline_group == "Classical Machine Learning":
-            st.error("X_train.npy not found. Create dataset in Feature Lab tab.")
-        elif not os.path.exists(os.path.join(active_b_dir, 'df_test_feats.pkl')) and baseline_group == "Physics Models (PVLib)":
-             st.error("df_test_feats.pkl not found.")
+        if baseline_group == "Classical Machine Learning" and not os.path.exists(os.path.join(active_b_dir, 'X_train.npy')):
+            st.error(
+                f"❌ **X_train.npy tidak ditemukan** di `{active_b_dir}`.\n\n"
+                "Dataset ini hanya memiliki file `.pkl` dan belum di-generate tensor `.npy`.\n"
+                "**Solusi**: Buka tab **Data Prep & Features** → pilih dataset ini → klik **Run Preprocessing** "
+                "untuk membuat X_train.npy, X_test.npy, y_train.npy, y_test.npy."
+            )
+        elif baseline_group == "Physics Models (PVLib)" and not os.path.exists(os.path.join(active_b_dir, 'df_test_feats.pkl')):
+            st.error("df_test_feats.pkl not found.")
         else:
             with st.spinner(f"Running {b_model}..."):
                 from src.baseline_models import evaluate_ml_baseline, evaluate_physics_baseline
@@ -2945,37 +2867,112 @@ with tab_eval:
         with col2:
             # Try to build timestamps
             try:
-                df_test_r = results['df_test']
-                test_idx = results['test_indices']
-                horizon_r = results['pv_test_actual'].shape[1]
-                pos_grid = test_idx[:, np.newaxis] + np.arange(horizon_r)
-                # Clip pos_grid to prevent IndexError just in case
-                pos_grid = np.clip(pos_grid, 0, len(df_test_r) - 1)
-                
-                # Fetch timestamps using 1D flattened array
-                ts_flat = df_test_r.index[pos_grid.flatten()]
+                if 'df_test' in results and 'test_indices' in results:
+                    df_test_r = results['df_test']
+                    test_idx = results['test_indices']
+                    horizon_r = results['pv_test_actual'].shape[1]
+                    pos_grid = test_idx[:, np.newaxis] + np.arange(horizon_r)
+                    pos_grid = np.clip(pos_grid, 0, len(df_test_r) - 1)
+                    ts_flat = df_test_r.index[pos_grid.flatten()]
+                elif 'timestamps' in results:
+                    # Fallback for Target Testing results format
+                    ts_flat = results['timestamps']
+                else:
+                    raise KeyError("Object 'df_test' or 'timestamps' missing from results.")
                 
                 # Format to string neatly 
                 if hasattr(ts_flat, 'strftime'):
                     ts_flat = ts_flat.strftime('%Y-%m-%d %H:%M:%S').tolist()
             except Exception as e:
                 import traceback
+                # print(traceback.format_exc())
                 print(f"Failed to generate timestamps: {e}")
                 ts_flat = list(range(len(actual_flat)))
                 
             df_preds = pd.DataFrame({
                 'timestamp': ts_flat,
-                'actual': actual_flat,
-                'predicted': pred_flat,
+                'actual_kw': actual_flat,
+                'predicted_kw': pred_flat,
                 'ghi': ghi_flat,
             })
             csv_preds = df_preds.to_csv(index=False)
             st.download_button(
-                label="Download Predictions (CSV)",
+                label="Download Predictions kW (CSV)",
                 data=csv_preds,
-                file_name="test_predictions.csv",
+                file_name="test_predictions_kw.csv",
                 mime="text/csv",
-                use_container_width=True,            )
+                use_container_width=True,
+            )
+
+        # ====== NORMALIZED / CSI TABLE ======
+        st.markdown("---")
+        st.markdown("#### Normalized Prediction Table (CSI / Capacity Factor, 0–1)")
+        st.caption(
+            "Nilai prediksi dan aktual dalam skala 0–1. "
+            "Kolom **csi_pred** adalah output langsung model GRU (dapat digunakan sebagai "
+            "*Custom Production Profile* di HOMER Pro). "
+            "Kolom **capacity_factor_pred** = pv_pred_kw / kapasitas_sistem."
+        )
+
+        # Build CSI normalized table
+        csi_pred_arr  = results.get('csi_test_pred')
+        csi_actual_arr = results.get('csi_test_actual')
+        eval_cap      = results.get('eval_capacity_kw', cfg['pv_system']['nameplate_capacity_kw'])
+
+        if csi_pred_arr is not None and csi_actual_arr is not None:
+            csi_pred_flat   = csi_pred_arr.flatten()
+            csi_actual_flat = csi_actual_arr.flatten()
+            cap_factor_pred = np.clip(pred_flat / max(eval_cap, 1e-6), 0.0, 1.0)
+            cap_factor_act  = np.clip(actual_flat / max(eval_cap, 1e-6), 0.0, 1.0)
+
+            df_csi = pd.DataFrame({
+                'timestamp'           : ts_flat,
+                'csi_actual'          : np.round(csi_actual_flat, 4),
+                'csi_pred'            : np.round(csi_pred_flat, 4),
+                'capacity_factor_actual': np.round(cap_factor_act, 4),
+                'capacity_factor_pred'  : np.round(cap_factor_pred, 4),
+                'pv_actual_kw'        : np.round(actual_flat, 4),
+                'pv_pred_kw'          : np.round(pred_flat, 4),
+            })
+
+            # Preview table (first 200 rows)
+            n_preview = st.slider("Jumlah baris yang ditampilkan:", 24, min(500, len(df_csi)), 96, step=24,
+                                  key="csi_table_preview_n")
+            st.dataframe(
+                df_csi.head(n_preview).style.format({
+                    'csi_actual'           : '{:.4f}',
+                    'csi_pred'             : '{:.4f}',
+                    'capacity_factor_actual': '{:.4f}',
+                    'capacity_factor_pred'  : '{:.4f}',
+                    'pv_actual_kw'         : '{:.3f}',
+                    'pv_pred_kw'           : '{:.3f}',
+                }),
+                use_container_width=True,
+                height=400,
+            )
+
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    label=f"Download Full Normalized Table (CSV) — {len(df_csi):,} baris",
+                    data=df_csi.to_csv(index=False),
+                    file_name="test_predictions_normalized.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with col_dl2:
+                # HOMER-ready single-column capacity factor (csi_pred only, no header skip needed)
+                homer_col = pd.DataFrame({'capacity_factor': np.round(csi_pred_flat, 6)})
+                st.download_button(
+                    label="Download HOMER Production Profile (1-column CSV)",
+                    data=homer_col.to_csv(index=False),
+                    file_name="homer_production_profile.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    help="Format siap impor ke HOMER Pro sebagai 'Custom Production Profile' (kolom tunggal 0-1).",
+                )
+        else:
+            st.info("Tabel normalized belum tersedia. Klik **Run Evaluation** untuk menghasilkan data CSI/normalized.")
     else:
         st.info("No evaluation results yet. Run Evaluate or Full Pipeline first.")
 
@@ -3073,6 +3070,7 @@ with tab_transfer:
                                 'timestamps': result['timestamps'],
                                 'actual_full': result['actual_full'],
                                 'pred_full': result['pred_full'],
+                                'pred_cf': result.get('pred_cf', result['pred_full']),
                                 'horizon': result['horizon'],
                                 'output': stdout_capture.getvalue(),
                                 'target_folder': selected_target,
@@ -3160,83 +3158,98 @@ with tab_transfer:
                         except Exception:
                             pass
 
-                    m = eval_data['metrics']
-                    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
-                    col1.metric("MAE", f"{m.get('mae', 0):.4f}")
-                    col2.metric("RMSE", f"{m.get('rmse', 0):.4f}")
-                    col3.metric("nMAE", f"{m.get('norm_mae', 0):.4f}")
-                    col4.metric("nRMSE", f"{m.get('norm_rmse', 0):.4f}")
-                    col5.metric("R2", f"{m.get('r2', 0):.4f}")
-                    col6.metric("MAPE", f"{m.get('mape', 0):.2f}%")
-                    col7.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
-                    
                     # ==========================================================
-                    # 4. VISUALIZATION & ANALYSIS (COMPLETE REWRITE)
+                    # 4. INFERENCE VISUALIZATION & ANALYSIS 
                     # ==========================================================
                     st.markdown("---")
-                    st.markdown("#### Visualisasi & Analysis Hasil Target Testing")
+                    st.markdown("#### Hasil Prediksi Model (Inference Mode)")
+                    st.info("Mode Inference: Target berupa prediksi Normalized Power (Capacity Factor). Tanpa pembandingan GT/Metric.")
                     
                     import plotly.graph_objects as go
                     import plotly.express as px
 
-                    # 1. Prediction Step Selection
+                    # Prediction Step Selection
                     horizon = eval_data.get('horizon', 24)
-                    st.markdown("##### Prediction Controls")
                     selected_step = st.slider("Select Forecast Step (T+n):", 1, horizon, 1, key="res_step_slider_vfinal")
                     step_idx = selected_step - 1
-                    st.caption(f"Showing visualization for hour T+{selected_step} after input on all testing data (no time filter).")
                     
-                    # 2. Build Base Data (Sorted & Clean)
+                    # Cek if inference only (no meaningful actual data)
+                    act_sum = np.sum(eval_data.get('actual_full', np.zeros(1)))
+                    is_inference_only = act_sum == 0 or np.isnan(act_sum)
+                    
+                    # Build Inference Data (2 Columns Only)
                     df_res = pd.DataFrame({
-                        'AnchorTime': pd.to_datetime(eval_data['timestamps']),
-                        'Actual_kW': eval_data['actual_full'][:, step_idx],
-                        'Predicted_kW': eval_data['pred_full'][:, step_idx],
+                        'timestamp': pd.to_datetime(eval_data['timestamps']) + pd.Timedelta(hours=selected_step),
+                        'predicted_capacity_factor': eval_data['pred_cf'][:, step_idx]
                     })
-                    # Target Time is when the power actually happened (Anchor + Step)
-                    df_res['TargetTime'] = df_res['AnchorTime'] + pd.Timedelta(hours=selected_step)
-                    df_res['Date'] = df_res['TargetTime'].dt.date
-                    df_res['Error_kW'] = df_res['Actual_kW'] - df_res['Predicted_kW']
-                    df_res = df_res.sort_values('TargetTime')
-
-                    # 3. Stats (Immediate Feedback)
-                    if not df_res.empty:
-                        f_mae = np.mean(np.abs(df_res['Error_kW']))
-                        f_rmse = np.sqrt(np.mean(df_res['Error_kW']**2))
-                        f_ss_res = np.sum(df_res['Error_kW']**2)
-                        f_ss_tot = np.sum((df_res['Actual_kW'] - np.mean(df_res['Actual_kW']))**2)
-                        f_r2 = 1 - (f_ss_res / f_ss_tot) if f_ss_tot > 0 else 0
+                    
+                    # --- POST-PROCESSING FILTERS ---
+                    with st.expander("🛠️ Post-Processing & Night-Filtering", expanded=False):
+                        st.caption("Clean up small prediction noise or nighttime values.")
+                        c_pp1, c_pp2 = st.columns(2)
                         
-                        st.info(f" **Statistik Keseluruhan (T+{selected_step})**: MAE=`{f_mae:.4f}` | RMSE=`{f_rmse:.4f}` | R2=`{f_r2:.4f}` | Total Data: `{len(df_res)}` baris")
+                        enable_solar_filter = c_pp1.checkbox("Jam Operasional Siang (Filter)", value=True, help="Keep solar yield within typical daylight hours and zero out everything else.")
+                        if enable_solar_filter:
+                            solar_start, solar_end = c_pp1.slider("Daylight Range:", 0, 24, (6, 18), help="Only keep predictions within this hour range.")
+                        
+                        enable_threshold = c_pp2.checkbox("Apply Min Threshold", value=True, help="Ignore extremely small values (noise).")
+                        if enable_threshold:
+                            cf_threshold = c_pp2.number_input("Zero if CF <:", value=0.001, format="%.4f", step=0.0005)
+                        
+                    # Apply Logic
+                    if enable_solar_filter:
+                        # Logic: Keep values ONLY inside [solar_start, solar_end]
+                        if solar_start < solar_end: # Normal Day (e.g. 6 to 18)
+                            df_res.loc[(df_res['timestamp'].dt.hour < solar_start) | (df_res['timestamp'].dt.hour >= solar_end), 'predicted_capacity_factor'] = 0
+                        else: # Wrap around (rare for solar but handled)
+                            df_res.loc[(df_res['timestamp'].dt.hour < solar_start) & (df_res['timestamp'].dt.hour >= solar_end), 'predicted_capacity_factor'] = 0
+                            
+                    if enable_threshold:
+                        df_res.loc[df_res['predicted_capacity_factor'] < cf_threshold, 'predicted_capacity_factor'] = 0
+
+                    if not is_inference_only:
+                        # Fallback metrics for testing mode
+                        m = eval_data['metrics']
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1.metric("MAE", f"{m.get('mae', 0):.4f}")
+                        col2.metric("RMSE", f"{m.get('rmse', 0):.4f}")
+                        col3.metric("R2", f"{m.get('r2', 0):.4f}")
+                        col4.metric("MAPE", f"{m.get('mape', 0):.2f}%")
+                        col5.metric("Inf. Time", f"{eval_data['inference_time']:.3f}s")
                     else:
-                        st.warning(f"Data is empty.")
-
-                    # 5. Result Tabs
-                    tab_labels = ["Scatter Plot", "Line Chart Harian"]
-                    if eval_data.get('use_tscv'):
-                        tab_labels.append("Stability Analysis (TSCV)")
+                        # PREMIUM ANALYTICS SUMMARY
+                        avg_cf = df_res['predicted_capacity_factor'].mean()
+                        max_cf = df_res['predicted_capacity_factor'].max()
+                        solar_hours = (df_res['predicted_capacity_factor'] > 0.005).sum() 
+                        
+                        p_cap = cfg['pv_system'].get('nameplate_capacity_kw', 1000.0)
+                        total_kwh = avg_cf * len(df_res) * p_cap
+                        
+                        sa1, sa2, sa3, sa4 = st.columns(4)
+                        sa1.metric("Annual Avg CF", f"{avg_cf:.4f}")
+                        sa2.metric("Max Hourly CF", f"{max_cf:.4f}")
+                        sa3.metric("Est. Generation", f"{total_kwh/1000:.2f} MWh")
+                        sa4.metric("Solar Coverage", f"{solar_hours/len(df_res)*100:.1f}%")
                     
+                    st.caption(f"**Analytics Context:** Model inference completed in {eval_data.get('inference_time', 0):.3f}s on {eval_data.get('device', 'N/A')}. Total data points: {len(df_res)} hours.")
+                    
+                    # Fallback actual handling if in validation mode
+                    if not is_inference_only:
+                        df_res['actual_kw'] = eval_data['actual_full'][:, step_idx]
+                        df_res['predicted_kw'] = eval_data['pred_full'][:, step_idx]
+                        
+                    df_res = df_res.sort_values('timestamp')
+                    df_res['Date'] = df_res['timestamp'].dt.date
+
+                    tab_labels = ["Kurva Prediksi", "Data Table Export"]
+                    if eval_data.get('use_tscv') and not is_inference_only: tab_labels.append("Stability Analysis")
                     tabs = st.tabs(tab_labels)
-                    
-                    with tabs[0]: # Scatter Plot
-                        fig_s = px.scatter(
-                            df_res, x='Actual_kW', y='Predicted_kW', 
-                            title=f"Correlation Plot (Step T+{selected_step})",
-                            template="plotly_dark", opacity=0.5, color_discrete_sequence=['#FFC107'],
-                            labels={'Actual_kW': 'Actual (kW)', 'Predicted_kW': 'Predicted (kW)'}
-                        )
-                        if not df_res.empty:
-                            limit = max(df_res['Actual_kW'].max(), df_res['Predicted_kW'].max())
-                            fig_s.add_shape(type='line', x0=0, y0=0, x1=limit, y1=limit, line=dict(color='white', dash='dash'), name="Ideal (y=x)")
-                        fig_s.update_layout(height=450)
-                        st.plotly_chart(fig_s, use_container_width=True)
 
-                    with tabs[1]: # Line Chart Harian
-                        st.markdown("##### Analysis Fluktuasi Energi (Rising/Falling Graph)")
+                    with tabs[0]: # Line Chart
+                        st.markdown("##### Fluktuasi Capacity Factor Harian")
                         if not df_res.empty:
                             all_dates = sorted(df_res['Date'].unique())
                             min_d, max_d = all_dates[0], all_dates[-1]
-                            
-                            st.info(f"You can select a date range. The chart will show energy fluctuation trends (especially during daytime).")
                             
                             c_date1, c_date2 = st.columns([1, 1])
                             with c_date1:
@@ -3244,112 +3257,79 @@ with tab_transfer:
                             with c_date2:
                                 end_d = st.date_input("Sampai Tanggal:", max_d, min_value=min_d, max_value=max_d, key=f"ds_end_{eval_data.get('timestamp')}")
                             
-                            # Filter data by range
                             df_plot = df_res[(df_res['Date'] >= start_d) & (df_res['Date'] <= end_d)].copy()
                             
                             if not df_plot.empty:
                                 fig_line = go.Figure()
-                                
-                                # ACTUAL - Blueish line, thick, with area fill for "Rising/Falling" look
                                 fig_line.add_trace(go.Scatter(
-                                    x=df_plot['TargetTime'], y=df_plot['Actual_kW'], 
-                                    mode='lines', name='Actual Energy', 
-                                    line=dict(color='#3b82f6', width=3, shape='spline'), # Spline for smooth curve
-                                    fill='tozeroy', fillcolor='rgba(59, 130, 246, 0.1)', # Subtle fill
-                                    hovertemplate="Waktu: %{x}<br>Actual: %{y:.2f} kW<extra></extra>"
+                                    x=df_plot['timestamp'], y=df_plot['predicted_capacity_factor'], 
+                                    mode='lines', name='Predicted Capacity Factor', 
+                                    line=dict(color='#f59e0b', width=3, shape='spline'),
+                                    fill='tozeroy', fillcolor='rgba(245, 158, 11, 0.1)',
+                                    hovertemplate="Time: %{x}<br>CF: %{y:.4f}<extra></extra>"
                                 ))
                                 
-                                # PREDICTED - Orange/Amber line, dashed
-                                fig_line.add_trace(go.Scatter(
-                                    x=df_plot['TargetTime'], y=df_plot['Predicted_kW'], 
-                                    mode='lines', name='Predicted (AI)', 
-                                    line=dict(color='#f59e0b', width=3, dash='dash', shape='spline'),
-                                    hovertemplate="Waktu: %{x}<br>Predicted: %{y:.2f} kW<extra></extra>"
-                                ))
-                                
-                                # Layout tuning to match reference aesthetic
-                                title_text = f"Kurva Energi: {start_d} s/d {end_d} (T+{selected_step})" if start_d != end_d else f"Kurva Energi: {start_d} (T+{selected_step})"
-                                
+                                if not is_inference_only:
+                                   fig_line.add_trace(go.Scatter(
+                                       x=df_plot['timestamp'], y=df_plot['actual_kw'], 
+                                       mode='lines', name='Actual', 
+                                       line=dict(color='#3b82f6', width=2, dash='dash')
+                                   ))
+
                                 fig_line.update_layout(
-                                    title=dict(text=title_text, font=dict(size=20, family="Manrope", color="#f8fafc")),
-                                    xaxis=dict(
-                                        title="Timeline", 
-                                        type='date',
-                                        gridcolor='rgba(255,255,255,0.05)',
-                                        rangeslider=dict(visible=True), # Range slider for easy navigation
-                                        rangeselector=dict(
-                                            buttons=list([
-                                                dict(count=1, label="1d", step="day", stepmode="backward"),
-                                                dict(count=3, label="3d", step="day", stepmode="backward"),
-                                                dict(step="all")
-                                            ]),
-                                            bgcolor="rgba(30, 41, 59, 0.8)"
-                                        )
-                                    ),
-                                    yaxis=dict(
-                                        title="Power (kW)",
-                                        gridcolor='rgba(255,255,255,0.1)',
-                                        zeroline=False
-                                    ),
-                                    template="plotly_dark",
-                                    hovermode="x unified",
-                                    height=600,
-                                    margin=dict(l=50, r=50, t=80, b=50),
-                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                                    title=dict(text=f"Prediksi Capacity Factor: {start_d} s/d {end_d} (T+{selected_step})", font=dict(size=18, color="#f8fafc")),
+                                    xaxis=dict(title="Timeline", type='date', rangeslider=dict(visible=True)),
+                                    yaxis=dict(title="Capacity Factor (0-1)", range=[0, 1.05]),
+                                    template="plotly_dark", hovermode="x unified", height=500
                                 )
                                 st.plotly_chart(fig_line, use_container_width=True)
-                                
-                                # Stats for the selected range
-                                r_mae = np.mean(np.abs(df_plot['Error_kW']))
-                                r_rmse = np.sqrt(np.mean(df_plot['Error_kW']**2))
-                                st.info(f" **Selected Period Statistics**: MAE=`{r_mae:.4f}` | RMSE=`{r_rmse:.4f}` | Total Data Points: `{len(df_plot)}` jam")
                             else:
-                                st.warning("No data available for the selected date range.")
+                                st.warning("No data available for the selected range.")
+
+                    with tabs[1]: # Data Table Export (2 Cols)
+                        st.info(f"Generated {len(df_res)} prediction points for T+{selected_step}")
+                        if is_inference_only:
+                            display_df = df_res[['timestamp', 'predicted_capacity_factor']]
                         else:
-                            st.warning("Testing results not available. Run 'Run Target Testing' first.")
-
-                    if eval_data.get('use_tscv') and len(tabs) > 2:
-                        with tabs[2]:
-                            st.markdown("##### Stabilitas Performa Geografis/Kronologis")
-                            df_f = pd.DataFrame(eval_data['fold_results'])
-                            st.dataframe(df_f.style.format({
-                                'mae': '{:.4f}', 'rmse': '{:.4f}', 'r2': '{:.4f}', 'nmae': '{:.2f}%'
-                            }).background_gradient(cmap='YlGnBu_r', subset=['mae', 'rmse']), use_container_width=True)
-                            
-                            fig_t = go.Figure()
-                            fig_t.add_trace(go.Bar(x=df_f['fold'], y=df_f['mae'], name="MAE (Fold)", marker_color='#2196F3'))
-                            fig_t.add_trace(go.Scatter(x=df_f['fold'], y=df_f['r2'], name="R2 Score", yaxis="y2", line=dict(color='#FFEB3B', width=3)))
-                            fig_t.update_layout(
-                                title="TSCV Fold Results", template="plotly_dark", height=400,
-                                yaxis=dict(title="MAE (kW)"),
-                                yaxis2=dict(title="R2 Score", overlaying='y', side='right', range=[0, 1]),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                            )
-                            st.plotly_chart(fig_t, use_container_width=True)
-                            st.info(f" **Analysis**: Highest R2 at Fold {df_f.loc[df_f['r2'].idxmax(), 'fold']} ({df_f['r2'].max():.4f}).")
-
-                    # --- NEW: EXPORT ---
-                    with st.expander("Export & Data Details"):
-                        st.info(f"Showing data for prediction step **T+{selected_step}**")
-                        st.dataframe(df_res.head(100), use_container_width=True)
+                            display_df = df_res[['timestamp', 'predicted_capacity_factor', 'actual_kw']]
                         
-                        # Export button
+                        st.dataframe(display_df, use_container_width=True)
+                        
                         try:
-                            import io
-                            excel_buffer = io.BytesIO()
-                            df_res.to_excel(excel_buffer, index=False)
-                            st.download_button(
-                                label=f"Download Hasil Prediksi T+{selected_step} (.xlsx)",
-                                data=excel_buffer.getvalue(),
-                                file_name=f"prediksi_T{selected_step}_{eval_data['model_id']}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
+                            # EXPORT BUTTONS
+                            c_ex1, c_ex2 = st.columns(2)
+                            with c_ex1:
+                                # Excel Export (Clean for Excel/Tableau)
+                                from io import BytesIO
+                                output = BytesIO()
+                                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                                    display_df.to_excel(writer, index=False, sheet_name='Forecast_Results')
+                                st.download_button(
+                                    "📥 Download Excel (Standard)",
+                                    data=output.getvalue(),
+                                    file_name=f"Forecast_{eval_data.get('model_name', 'model')}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True
+                                )
+                            
+                            with c_ex2:
+                                # HOMER Pro specialized format (.txt, 8760 rows, one value per line)
+                                homer_data = df_res['predicted_capacity_factor'].tolist()
+                                homer_str = "\n".join([f"{v:.6f}" for v in homer_data])
+                                
+                                st.download_button(
+                                    "🚀 Download for HOMER Pro (.txt)",
+                                    data=homer_str,
+                                    file_name=f"HOMER_{eval_data.get('model_name', 'model')}_Annual.txt",
+                                    mime="text/plain",
+                                    help="One value per line format.",
+                                    use_container_width=True
+                                )
                         except Exception as e_exp:
-                            st.warning(f"Gagal menyiapkan export: {e_exp}")
-                    
-                    with st.expander("Log Konsol Detail"):
-                        st.code(eval_data['output'], language="text")
+                            st.warning(f"Export failed: {e_exp}")
+                            
+                    with st.expander("Log Konsol"):
+                        st.code(eval_data.get('output', ''), language="text")
 
                     # --- ZEROSHOT SAVING SECTION ---
                     st.markdown("---")

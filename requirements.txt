@@ -33,3 +33,4 @@ seaborn
 # Dashboard
 streamlit
 plotly
+pvlib
