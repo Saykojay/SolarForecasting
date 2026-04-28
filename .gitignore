@@ -59,3 +59,10 @@ test.json
 
 # Tuning Results
 tuning results/
+
+# Thesis Grand Plan & Private Agent Workflows
+Grand Plan skripsi alt.md
+otomatisasi_workflow.md
+PVsyst8.1_Data/
+config-*.yaml
+*.bak

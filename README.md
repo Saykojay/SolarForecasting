@@ -2,11 +2,10 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-An end-to-end deep learning framework designed for high-fidelity Photovoltaic (PV) power output forecasting. This project was developed as part of an **Undergraduate Thesis (Skripsi)** supervised by **Universitas Indonesia / Your University** to drive the **Power-to-Methanol** energy transition in East Nusa Tenggara (NTT), Indonesia.
+An end-to-end deep learning framework designed for high-fidelity Photovoltaic (PV) power output forecasting. This repository contains the **Solar Power Forecasting** module of an Undergraduate Thesis (Skripsi) at **Universitas Indonesia**, aimed at supporting the energy transition in East Nusa Tenggara (NTT), Indonesia.
 
-> [!IMPORTANT]
-> This pipeline serves as **Stage I** of a "Sequential Hybrid Optimization" framework: 
-> **AI Forecasting (Stage I)** → **HOMER Pro Sizing (Stage II)** → **Aspen Plus Process Simulation (Stage III)**.
+> [!NOTE]
+> This project focuses on the **Forecasting Component (Stage I)** of a larger research framework. It is designed as a standalone tool for researchers and engineers to predict solar power output using SOTA Deep Learning architectures.
 
 ---
 
@@ -24,19 +23,15 @@ An end-to-end deep learning framework designed for high-fidelity Photovoltaic (P
 ```mermaid
 graph TD
     A[NASA POWER / Open-Meteo API] -->|Historical Weather| B[Data Acquisition Scripts]
-    B -->|cleaning & refinement| C[TMY Synthesis Module]
-    C -->|8.760h Daily Profile| D[Modular ML Pipeline v1]
+    B -->|Cleaning & Refinement| C[TMY Synthesis Module]
+    C -->|8,760h Daily Profile| D[Modular ML Pipeline v1]
     
-    subgraph "ML Pipeline (Stage I)"
+    subgraph "Solar Forecasting Module"
     D --> E[Physics-Based Preprocessing]
     E --> F[Feature Engineering: Cyclical, Lags, Rolling]
-    F --> G[Deep Learning Models: GRU Champion]
-    G --> H[Performance Dashboard]
+    F --> G[Deep Learning Models: PatchTST, GRU, Autoformer]
+    G --> H[Performance Dashboard & Insights]
     end
-    
-    H -->|Custom Production Profile| I[HOMER Pro Optimization]
-    I -->|Optimal Sizing| J[Aspen Plus Simulation]
-    J -->|LCOM Calculation| K[Final Thesis Results]
 ```
 
 ---
@@ -48,7 +43,7 @@ graph TD
 - **Physics-Infused Features** — Clear Sky Index (CSI), Solar Position, and Physical Parameter Clamping.
 - **Interactive Dashboard** — Full Streamlit interface for training monitoring and dataset insights.
 - **Optimization** — Bayesian hyperparameter tuning via Optuna.
-- **Industrial Export** — Automated generation of `Custom Production Profiles` for HOMER Pro.
+- **Industrial Export** — Automated generation of production profiles for downstream analysis.
 
 ---
 
@@ -94,9 +89,11 @@ streamlit run app.py
 
 ---
 
-## 🎓 Academic Thesis Context
-This project implements the methodology proposed in my thesis:
+## 🎓 Academic Context
+This project is the primary technical implementation of the solar forecasting methodology proposed in my undergraduate thesis:
 **"Comparative Study of Power-to-Methanol System Configurations: Techno-Economic Analysis Based on Topology Variations and Grid Connection (On-Grid vs Off-Grid)"**.
+
+Although this repository is specialized for **Solar Power Forecasting**, it provides the foundational data required for subsequent techno-economic assessments and system optimizations.
 
 ### Acknowledgments
 *   **Location**: NTT, Indonesia (Target Site)
