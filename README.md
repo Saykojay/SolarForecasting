@@ -1,7 +1,6 @@
 # ☀️ Modular Solar PV Forecasting Pipeline (v1)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 An end-to-end deep learning framework designed for high-fidelity Photovoltaic (PV) power output forecasting. This project was developed as part of an **Undergraduate Thesis (Skripsi)** supervised by **Universitas Indonesia / Your University** to drive the **Power-to-Methanol** energy transition in East Nusa Tenggara (NTT), Indonesia.
 
@@ -100,7 +99,6 @@ This project implements the methodology proposed in my thesis:
 **"Comparative Study of Power-to-Methanol System Configurations: Techno-Economic Analysis Based on Topology Variations and Grid Connection (On-Grid vs Off-Grid)"**.
 
 ### Acknowledgments
-*   **Supervisor**: [Supervisor Name/University]
 *   **Location**: NTT, Indonesia (Target Site)
 *   **Goal**: Decarbonizing the chemical industry through sequential AI-Optimized systems.
 
